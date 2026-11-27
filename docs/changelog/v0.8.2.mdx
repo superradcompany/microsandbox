@@ -1,0 +1,64 @@
+---
+title: "v0.8.2"
+sidebarTitle: "v0.8.2"
+description: "Keep pinned images through image prune, harden shared and multi-tenant hosts, and restart Cloud sandboxes in place."
+icon: "bolt"
+---
+
+November 24, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.8.2) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.8.1...v0.8.2)
+
+## New features
+
+**Keep pre-warmed images when you prune.** `msb image prune` accepts a repeatable `--exclude-from <PATH>` flag. Each file lists one OCI image reference per line. References are normalized like `msb pull`, so `alpine:3.20` keeps `docker.io/library/alpine:3.20` and its layers. A missing or unreadable file, or an invalid reference, makes the command exit with an error without deleting anything. [Image commands](/cli/image-commands)
+
+```bash
+msb image prune --yes --exclude-from /etc/microsandbox/keep-images.txt
+```
+
+**Isolate private images on shared hosts.** Cached images now record whether they came from an anonymous pull, an authenticated pull or a local archive. Pulls without credentials reuse only public or locally loaded entries, and pulls with credentials always check the registry. In Rust, `SandboxBuilder::image_cache_dir`, `RestoreBuilder::image_cache_dir` and `RegistryConfigBuilder::cache_dir` keep a sandbox's image in a separate cache directory.
+
+**Opt-in host hardening.** New `runtime.strict_host_files`, `runtime.patches` and `snapshots.copy_files` settings reject symlinks in SDK log and disk-lock opens, stage host-copy patches within size limits, and give snapshot and restored files their own inodes. [Configuration](/configuration#runtime)
+
+**Cloud restart in place.** Restarting a running Cloud sandbox uses the Cloud restart route instead of a stop and start, so `force` works on Cloud. Timeouts are rounded up to whole seconds and cannot exceed 60 seconds. An API without the route returns `Unsupported`. [Lifecycle](/sandboxes/lifecycle)
+
+Rust also adds [`AgentClient::connect_in_band_with_deadline`](/sdk/rust/agent-client) to keep bulk agent payloads on the relay socket.
+
+## Fixes
+
+- Strict hostname policy now also denies UDP traffic, including QUIC and HTTP/3, that only a hostname rule allows. DNS forwarding is unaffected. [Networking](/networking/overview)
+- `msb-metrics` flushes every second by default instead of every 10 seconds, so guest memory metrics are no longer dropped as stale. [msb-metrics](/observability/msb-metrics)
+- On Windows, a protected `MSB_HOME` can live on a shared NTFS data drive. [Windows troubleshooting](/troubleshooting/windows)
+- Unrecognized Cloud HTTP 400 and 422 responses keep their status and server message.
+
+## Before upgrading
+
+- **Strict UDP needs the new runtime.** Upgrade `msb` and restart running sandboxes. [Before upgrading](/migrations/v0.8#before-upgrading)
+- **Multi-tenant hosts.** The multi-tenant profile turns on the new hardening settings, and existing private layers in the shared cache need cleanup. [Before upgrading](/migrations/v0.8#before-upgrading)
+- **Rust Cloud errors.** Unrecognized HTTP 400 and 422 responses now return `MicrosandboxError::CloudHttp` instead of `MicrosandboxError::InvalidConfig`.
+- **Downgrades.** Downgrading to v0.8.1 or earlier is refused while an isolated image cache is in use. [Returning to an older release](/migrations/v0.8#returning-to-an-older-release)
+- **Coming from v0.7?** Follow the [v0.7 to v0.8 migration guide](/migrations/v0.8).
+
+## Contributors
+
+Thank you to everyone who contributed to this release.
+
+<ul className="msb-release-contributors not-prose">
+  <li>
+    <a href="https://github.com/appcypher">
+      <img src="https://avatars.githubusercontent.com/u/20358651?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@appcypher</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/TheRealSibasishBehera">
+      <img src="https://avatars.githubusercontent.com/u/95071627?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@TheRealSibasishBehera</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/toksdotdev">
+      <img src="https://avatars.githubusercontent.com/u/11903253?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@toksdotdev</span>
+    </a>
+  </li>
+</ul>
