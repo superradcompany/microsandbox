@@ -31,6 +31,18 @@
 
 <br />
 
+<div align="center">
+  <a href="https://microsandbox.dev">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./assets/microsandbox-cloud-banner-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="./assets/microsandbox-cloud-banner-light.png">
+      <img width="100%" src="./assets/microsandbox-cloud-banner-dark.png" alt="we are launching microsandbox cloud. learn more.">
+    </picture>
+  </a>
+</div>
+
+<br />
+
 **Microsandbox** runs **untrusted workloads** inside fast, local microVMs: AI agents, user code, plugins, CI jobs, dev environments, scrapers, and automation.
 
 ##

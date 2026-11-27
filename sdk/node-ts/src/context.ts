@@ -1,11 +1,27 @@
 import { UnsupportedError } from "./errors.js";
-import { binding, nativeOwner } from "./internal/provider.js";
+import { binding, defaultBinding, nativeOwner } from "./internal/provider.js";
 import { type NapiSnapshotSeed, type NapiContext } from "./internal/napi.js";
-import { withMappedErrors } from "./internal/error-mapping.js";
+import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import { Sandbox, SandboxListBuilder, sandboxPageFromNapi, type RestoreBuilder, type SandboxBuilder, type SandboxPage } from "./sandbox.js";
 import { Volume, type VolumeBuilder } from "./volume.js";
 import { Snapshot as Group, SnapshotLoadOptions, wrapImportResult, type SnapshotImportResult } from "./snapshot-group.js";
 import { Snapshot, wrapBuilder, type SnapshotBuilder, type HeadUpdate } from "./snapshot.js";
+
+/** Secret-safe metadata captured with a destination. */
+export interface ContextInfo {
+  readonly kind: "local" | "remote";
+  readonly source: string;
+  readonly profile?: string;
+  readonly apiUrl?: string;
+}
+
+/** Resolve once; later configuration changes do not redirect this context. */
+export function configuredContext(): Context {
+  try {
+    const native = defaultBinding().configuredContext();
+    return native.kind === "remote" ? RemoteContext.fromNative(native) : Context.fromNative(native);
+  } catch (error) { throw mapNapiError(error); }
+}
 
 export interface LocalContextOptions {
   readonly home?: string;
@@ -39,6 +55,12 @@ export class Context {
   /** @internal Rewrap already-retained native state without resolving configuration. */
   static fromNative(native: NapiContext): Context { return new Context(native); }
   get kind(): "local" | "remote" { return this.native.kind; }
+  get info(): ContextInfo {
+    try {
+      const info = JSON.parse(this.native.infoJson) as { kind: "local" | "remote"; source: string; profile?: string; api_url?: string };
+      return Object.freeze({ kind: info.kind, source: info.source, profile: info.profile, apiUrl: info.api_url });
+    } catch (error) { throw mapNapiError(error); }
+  }
 }
 
 export class LocalContext extends Context {

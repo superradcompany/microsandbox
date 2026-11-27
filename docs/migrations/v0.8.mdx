@@ -44,6 +44,12 @@ Keep `Sandbox.builder`, `Sandbox::builder`, `Sandbox.create`, and Go's `CreateSa
 
 Replace global backend setters and scoped overrides with an explicit `RemoteContext` or custom `LocalContext`. Builders and returned resources retain that destination. See [context selection](/operations/backends#sdk-contexts) for complete language examples. TypeScript and Python collections are synchronous properties (`context.sandboxes`); Rust and Go use methods (`context.sandboxes()` and `context.Sandboxes()`). Ruby uses ordinary method access. Use the selected context’s collections to keep related operations on the same provider.
 
+### Inspect and retain configured selection
+
+Replace removed backend-info getters with the [configured-context resolver](/sdk/overview#capture-the-configured-destination). Inspect metadata on the returned context, then use its collections to keep operations on the same destination even when the saved profile changes. This does not restore mutable global backend setters.
+
+`ContextSelectionSource` now includes `Managed` (`"managed"` in serialized metadata) when managed configuration chooses the destination. Rust applications with exhaustive matches on this enum must add that arm. Saved user profile selection continues to report `ActiveProfile` (`"active_profile"`).
+
 ### Use the returned resource directly
 
 `get` and `list` do not start a stopped sandbox. Execution, filesystem and SSH operations prepare the receiver when needed. `ensure_running` explicitly performs that same preparation and returns no new owning object. `get_running` combines lookup and preparation without creating a missing resource.
@@ -269,3 +275,5 @@ Keep the original backup and runtime pair until the upgrade is verified. Older t
 Released v0.7 SDKs and CLIs refuse a v0.8.0 runtime with `no tested sandbox launch contract for runtime 0.8.0`. This affects the v0.7 release line, not only v0.7.16. Use matching versions or a launcher update that explicitly supports the selected runtime. Do not change version metadata to bypass the check.
 
 In v0.8.2 and later, a sandbox or snapshot can use an isolated image cache (`image_cache_dir`). Managed downgrade to v0.8.1 or earlier refuses while any sandbox configuration or retained snapshot uses one, even after the source sandbox is removed. Older SDKs and CLIs ignore the setting and can reuse authenticated cache entries without checking provenance, so give older tools a separate cache root.
+
+In v0.8.3 and later on Windows, a new TLS signing key can be stored under `%LOCALAPPDATA%\microsandbox-credentials` when `MSB_HOME` is on a shared drive that cannot protect it. SDKs and CLIs through v0.8.2 know only the original key layout. Use v0.8.3 or later to capture, restore, or remove sandboxes created with these profile-backed credentials. See [storage on a shared drive](/troubleshooting/windows#storage-on-a-shared-drive).

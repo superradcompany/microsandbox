@@ -70,6 +70,13 @@ impl JsContext {
         })
     }
 
+    /// Metadata belongs to this context, never a newly resolved default.
+    #[napi(getter)]
+    pub fn info_json(&self) -> Result<String> {
+        serde_json::to_string(&self.inner.info().map_err(to_napi_error)?)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
     #[napi(getter)]
     pub fn kind(&self) -> &'static str {
         match self.inner.kind() {
@@ -310,4 +317,16 @@ impl JsContext {
             .await
             .map_err(to_napi_error)
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Resolve configuration without starting a VM or making a remote request.
+#[napi]
+pub fn configured_context() -> Result<JsContext> {
+    Ok(JsContext {
+        inner: microsandbox::resolve_context().map_err(to_napi_error)?,
+    })
 }

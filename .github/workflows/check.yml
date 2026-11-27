@@ -1614,7 +1614,8 @@ jobs:
         run: |
           go build ./...
           go vet ./...
-          go test -count=1 .
+          go test -count=1 . ./internal/ffi
+          MSB_READINESS_NATIVE_LIBRARY="$MICROSANDBOX_FFI_PATH" go test -tags readiness_native -run '^TestConfiguredContextNative$' -count=1 -timeout 2m .
           go test -tags "smoke microsandbox_ffi_path" -count=1 -timeout 2m .
 
   # ---------------------------------------------------------------------------

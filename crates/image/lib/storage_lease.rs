@@ -893,6 +893,29 @@ mod tests {
 
     #[tokio::test]
     async fn last_reader_release_wakes_writer_without_advancing_retry_time() {
+        // Another test's fork can inherit our lock until exec. Its eventual close cannot
+        // notify this process, and this test deliberately freezes the retry timer that
+        // handles external owners. Create the lease only after entering an isolated child.
+        const ISOLATED: &str = "MSB_TEST_ISOLATED_READER_RELEASE";
+        if std::env::var_os(ISOLATED).is_none() {
+            let name = std::thread::current()
+                .name()
+                .expect("named test thread")
+                .to_owned();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture"])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "isolated reader-release test failed: {}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            return;
+        }
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("resource");
         let reader = StorageLease::shared(&path).unwrap();
@@ -910,14 +933,16 @@ mod tests {
         );
         tokio::time::pause();
         drop(last_reader);
-        let deadline = Instant::now() + Duration::from_secs(1);
+        // This is only a wall-clock watchdog for scheduling the blocking lock attempt.
+        // Tokio's retry clock stays frozen, so a missing notification still fails.
+        let deadline = Instant::now() + Duration::from_secs(5);
         while !waiter.is_finished() && Instant::now() < deadline {
             tokio::task::yield_now().await;
         }
 
         assert!(
             waiter.is_finished(),
-            "last-reader release must wake the writer immediately"
+            "last-reader release must wake the writer without advancing the retry timer"
         );
         drop(waiter.await.unwrap().unwrap());
     }

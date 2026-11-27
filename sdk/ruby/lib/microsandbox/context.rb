@@ -3,6 +3,17 @@
 require "json"
 
 module Microsandbox
+  # Values describe captured configuration and never contain credentials.
+  ContextInfo = Data.define(:kind, :source, :profile, :api_url)
+
+  class Context
+    def info
+      value = JSON.parse(__info_json)
+      ContextInfo.new(kind: value.fetch("kind").to_sym, source: value.fetch("source").freeze,
+                     profile: value["profile"]&.freeze, api_url: value["api_url"]&.freeze)
+    end
+  end
+
   class LocalContext < Context
     def self.new(home: nil, config_path: nil)
       # Normalize Pathname-like inputs, without resolving or canonicalizing them here.

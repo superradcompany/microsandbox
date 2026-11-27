@@ -1,0 +1,46 @@
+---
+title: "v0.8.3"
+sidebarTitle: "v0.8.3"
+description: "Capture the configured SDK destination and its metadata, and use TLS interception with MSB_HOME on a shared Windows drive."
+icon: "bolt"
+---
+
+November 26, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.8.3) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.8.2...v0.8.3)
+
+## New features
+
+**Capture the configured destination.** Every SDK can now resolve the configured destination once and keep using it. The returned context exposes its kind, selection source, profile and API URL, and never its API key. Its collections keep the same endpoint and authentication even if `msb context use`, the saved profile or environment variables change later. Resolving does not create a sandbox or contact the remote API, and configuration errors are returned immediately. Ordinary package-level calls keep their existing selection behavior. [Capture the configured destination](/sdk/overview#capture-the-configured-destination)
+
+```typescript
+import { configuredContext } from "microsandbox";
+
+const destination = configuredContext();
+console.log(destination.info); // kind, source, profile, apiUrl
+const sandboxes = destination.sandboxes;
+```
+
+The same resolver is `resolve_context()` in Rust, `configured_context()` in Python, `ConfiguredContext()` in Go and `Microsandbox.configured_context` in Ruby.
+
+## Fixes
+
+- On Windows, sandboxes with TLS interception run when `MSB_HOME` is on a shared NTFS drive, including when `Authenticated Users` inherits Modify on a parent folder. New signing keys go to a private per-user directory when the drive cannot protect them, and drive and folder permissions are left unchanged. [Windows troubleshooting](/troubleshooting/windows#storage-on-a-shared-drive)
+
+## Before upgrading
+
+- **Rust `ContextSelectionSource`.** The enum has a new `Managed` variant, reported as `"managed"` when managed configuration chooses the destination. Exhaustive matches must handle it. [Inspect and retain configured selection](/migrations/v0.8#inspect-and-retain-configured-selection)
+- **Go `Info()`.** `Info()` returns an unsupported-operation error when an older native library cannot return retained metadata.
+- **Windows downgrades.** Older SDKs and CLIs cannot capture, restore or remove sandboxes whose TLS keys use the new per-user location. [Returning to an older release](/migrations/v0.8#returning-to-an-older-release)
+- **Coming from v0.7?** Follow the [v0.7 to v0.8 migration guide](/migrations/v0.8).
+
+## Contributors
+
+Thank you to everyone who contributed to this release.
+
+<ul className="msb-release-contributors not-prose">
+  <li>
+    <a href="https://github.com/appcypher">
+      <img src="https://avatars.githubusercontent.com/u/20358651?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@appcypher</span>
+    </a>
+  </li>
+</ul>
