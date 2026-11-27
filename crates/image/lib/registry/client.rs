@@ -662,17 +662,13 @@ impl Registry {
         }
 
         let resolve_started_at = Instant::now();
+        // oci-client verifies the requested manifest/index bytes against the pin
+        // and verifies the selected platform manifest against its index entry.
+        // Its returned digest identifies that platform manifest, so comparing it
+        // with an index pin would reject a valid pull. Retain the platform digest
+        // for materialization and cache identity.
         let (manifest_bytes, manifest_digest, config_bytes) =
             self.fetch_manifest_and_config(oci_ref).await?;
-        if let Some(expected) = reference.digest()
-            && manifest_digest != expected
-        {
-            return Err(ImageError::DigestMismatch {
-                digest: expected.to_owned(),
-                expected: expected.to_owned(),
-                actual: manifest_digest,
-            });
-        }
 
         let manifest_digest: Digest = manifest_digest.parse()?;
 
@@ -2987,8 +2983,17 @@ mod tests {
         super::Registry::new(Platform::default(), cache).unwrap();
     }
 
+    #[derive(Default)]
+    struct MockManifestOptions {
+        index_media_type: Option<&'static str>,
+        corrupt_index: bool,
+        corrupt_manifest: bool,
+    }
+
     struct MockOciRegistry {
         addr: std::net::SocketAddr,
+        index_digest: String,
+        manifest_digest: String,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
         manifest_requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         layer_blob_requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -2997,6 +3002,13 @@ mod tests {
 
     impl MockOciRegistry {
         fn start(required_auth_header: Option<&str>) -> Self {
+            Self::start_with_manifests(required_auth_header, MockManifestOptions::default())
+        }
+
+        fn start_with_manifests(
+            required_auth_header: Option<&str>,
+            options: MockManifestOptions,
+        ) -> Self {
             use std::io::{Read, Write};
             use std::net::TcpListener;
             use std::sync::Arc;
@@ -3032,7 +3044,7 @@ mod tests {
             }))
             .unwrap();
             let config_digest = format!("sha256:{}", hex::encode(Sha256::digest(&config_bytes)));
-            let manifest_bytes = serde_json::to_vec(&serde_json::json!({
+            let mut manifest_bytes = serde_json::to_vec(&serde_json::json!({
                 "schemaVersion": 2,
                 "mediaType": "application/vnd.oci.image.manifest.v1+json",
                 "config": {
@@ -3049,6 +3061,45 @@ mod tests {
             .unwrap();
             let manifest_digest =
                 format!("sha256:{}", hex::encode(Sha256::digest(&manifest_bytes)));
+            let index_media_type = options
+                .index_media_type
+                .unwrap_or("application/vnd.oci.image.index.v1+json");
+            let mut index_bytes = serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "mediaType": index_media_type,
+                "manifests": [{
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": format!("sha256:{}", "f".repeat(64)),
+                    "size": manifest_bytes.len(),
+                    "platform": {
+                        "architecture": if Platform::host_linux().arch.to_string() == "arm64" {
+                            "amd64"
+                        } else {
+                            "arm64"
+                        },
+                        "os": "linux"
+                    }
+                }, {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": manifest_digest,
+                    "size": manifest_bytes.len(),
+                    "platform": {
+                        "architecture": Platform::host_linux().arch.to_string(),
+                        "os": "linux"
+                    }
+                }]
+            }))
+            .unwrap();
+            let index_digest = format!("sha256:{}", hex::encode(Sha256::digest(&index_bytes)));
+
+            // Keep JSON valid and the advertised hashes unchanged. This proves
+            // rejection is caused by byte verification, not a parsing failure.
+            if options.corrupt_index {
+                index_bytes.push(b' ');
+            }
+            if options.corrupt_manifest {
+                manifest_bytes.push(b' ');
+            }
 
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let addr = listener.local_addr().unwrap();
@@ -3060,6 +3111,8 @@ mod tests {
             let thread_manifest_requests = Arc::clone(&manifest_requests);
             let thread_layer_blob_requests = Arc::clone(&layer_blob_requests);
             let required_auth = required_auth_header.map(str::to_owned);
+            let server_index_digest = index_digest.clone();
+            let server_manifest_digest = manifest_digest.clone();
 
             let handle = std::thread::spawn(move || {
                 while !thread_stop.load(Ordering::SeqCst) {
@@ -3122,16 +3175,29 @@ mod tests {
                         let _ = stream.write_all(header.as_bytes());
                     } else if path.contains("/manifests/") {
                         thread_manifest_requests.fetch_add(1, Ordering::SeqCst);
+                        // Resolve the child by digest; tag and other digest requests
+                        // receive the index so incorrect pins exercise verification.
+                        let (bytes, digest, media_type) = if options.index_media_type.is_some()
+                            && !path.ends_with(&format!("/manifests/{server_manifest_digest}"))
+                        {
+                            (&index_bytes, &server_index_digest, index_media_type)
+                        } else {
+                            (
+                                &manifest_bytes,
+                                &server_manifest_digest,
+                                "application/vnd.oci.image.manifest.v1+json",
+                            )
+                        };
                         let header = format!(
                             "HTTP/1.1 200 OK\r\n\
-                             Content-Type: application/vnd.oci.image.manifest.v1+json\r\n\
-                             Docker-Content-Digest: {manifest_digest}\r\n\
+                             Content-Type: {media_type}\r\n\
+                             Docker-Content-Digest: {digest}\r\n\
                              Content-Length: {}\r\n\
                              Connection: close\r\n\r\n",
-                            manifest_bytes.len()
+                            bytes.len()
                         );
                         let _ = stream.write_all(header.as_bytes());
-                        let _ = stream.write_all(&manifest_bytes);
+                        let _ = stream.write_all(bytes);
                     } else if path.ends_with(&format!("/blobs/{config_digest}")) {
                         let header = format!(
                             "HTTP/1.1 200 OK\r\n\
@@ -3162,6 +3228,8 @@ mod tests {
 
             Self {
                 addr,
+                index_digest,
+                manifest_digest,
                 stop,
                 manifest_requests,
                 layer_blob_requests,
@@ -3203,6 +3271,173 @@ mod tests {
     impl Drop for MockOciRegistry {
         fn drop(&mut self) {
             self.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pull_pinned_index_retains_platform_digest_and_warm_cache() {
+        for media_type in [
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        ] {
+            let server = MockOciRegistry::start_with_manifests(
+                None,
+                MockManifestOptions {
+                    index_media_type: Some(media_type),
+                    ..Default::default()
+                },
+            );
+            let reference = server.reference(&format!("library/public@{}", server.index_digest));
+            let temp = tempdir().unwrap();
+            let cache = GlobalCache::new(temp.path()).unwrap();
+            let registry = super::Registry::builder(Platform::host_linux(), cache.clone())
+                .add_insecure_registries(vec![server.host()])
+                .build()
+                .unwrap();
+            let options = PullOptions::default();
+
+            let cold = registry.pull(&reference, &options).await.unwrap();
+            assert!(!cold.cached);
+            assert_ne!(server.index_digest, server.manifest_digest);
+            assert_eq!(cold.manifest_digest.to_string(), server.manifest_digest);
+            assert_eq!(server.manifest_requests(), 2);
+            assert_eq!(server.layer_blob_requests(), 1);
+            let metadata = cache.read_image_entry(&reference).unwrap().unwrap();
+            assert_eq!(metadata.metadata.manifest_digest, server.manifest_digest);
+            assert_eq!(metadata.pull_auth, CacheAuthProvenance::Anonymous);
+
+            // Cache identity remains the selected image, even though the caller
+            // pinned its parent index. A warm pull must work without a registry.
+            server.stop();
+            let warm = registry.pull(&reference, &options).await.unwrap();
+            assert!(warm.cached);
+            assert_eq!(warm.manifest_digest, cold.manifest_digest);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pull_pinned_image_manifest() {
+        let server = MockOciRegistry::start(None);
+        let reference = server.reference(&format!("library/public@{}", server.manifest_digest));
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let registry = super::Registry::builder(Platform::host_linux(), cache)
+            .add_insecure_registries(vec![server.host()])
+            .build()
+            .unwrap();
+
+        let result = registry
+            .pull(&reference, &PullOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(result.manifest_digest.to_string(), server.manifest_digest);
+        assert_eq!(server.manifest_requests(), 1);
+        assert_eq!(server.layer_blob_requests(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pull_rejects_incorrect_index_pin_before_layers() {
+        let server = MockOciRegistry::start_with_manifests(
+            None,
+            MockManifestOptions {
+                index_media_type: Some("application/vnd.oci.image.index.v1+json"),
+                ..Default::default()
+            },
+        );
+        // The registry sends a self-consistent body and digest header, but they
+        // do not match the caller's pin. The header must not override that pin.
+        let reference = server.reference(&format!("library/public@sha256:{}", "0".repeat(64)));
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let registry = super::Registry::builder(Platform::host_linux(), cache.clone())
+            .add_insecure_registries(vec![server.host()])
+            .build()
+            .unwrap();
+
+        let error = registry
+            .pull(&reference, &PullOptions::default())
+            .await
+            .err()
+            .expect("invalid manifest digest must be rejected");
+        assert!(
+            matches!(
+                error,
+                ImageError::Registry(oci_client::errors::OciDistributionError::DigestError(
+                    oci_client::errors::DigestError::VerificationError { .. }
+                ))
+            ),
+            "{error:?}"
+        );
+        assert_eq!(server.manifest_requests(), 1);
+        assert_eq!(server.layer_blob_requests(), 0);
+        assert!(cache.read_image_entry(&reference).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pull_rejects_corrupt_pinned_manifests_before_layers() {
+        for (label, options, expected_requests) in [
+            (
+                "index",
+                MockManifestOptions {
+                    index_media_type: Some("application/vnd.oci.image.index.v1+json"),
+                    corrupt_index: true,
+                    ..Default::default()
+                },
+                1,
+            ),
+            (
+                "indexed image",
+                MockManifestOptions {
+                    index_media_type: Some("application/vnd.oci.image.index.v1+json"),
+                    corrupt_manifest: true,
+                    ..Default::default()
+                },
+                2,
+            ),
+            (
+                "direct image",
+                MockManifestOptions {
+                    corrupt_manifest: true,
+                    ..Default::default()
+                },
+                1,
+            ),
+        ] {
+            let has_index = options.index_media_type.is_some();
+            let server = MockOciRegistry::start_with_manifests(None, options);
+            let pin = if has_index {
+                &server.index_digest
+            } else {
+                &server.manifest_digest
+            };
+            let reference = server.reference(&format!("library/public@{pin}"));
+            let temp = tempdir().unwrap();
+            let cache = GlobalCache::new(temp.path()).unwrap();
+            let registry = super::Registry::builder(Platform::host_linux(), cache.clone())
+                .add_insecure_registries(vec![server.host()])
+                .build()
+                .unwrap();
+
+            let error = registry
+                .pull(&reference, &PullOptions::default())
+                .await
+                .err()
+                .expect("invalid manifest digest must be rejected");
+            assert!(
+                matches!(
+                    error,
+                    ImageError::Registry(oci_client::errors::OciDistributionError::DigestError(
+                        oci_client::errors::DigestError::VerificationError { .. }
+                    ))
+                ),
+                "{label}: {error:?}"
+            );
+            assert_eq!(server.manifest_requests(), expected_requests, "{label}");
+            assert_eq!(server.layer_blob_requests(), 0, "{label}");
+            assert!(
+                cache.read_image_entry(&reference).unwrap().is_none(),
+                "{label}"
+            );
         }
     }
 
