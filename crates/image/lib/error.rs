@@ -49,6 +49,15 @@ pub enum ImageError {
         actual: String,
     },
 
+    /// Manifest digest mismatch (possible corruption or tampering).
+    #[error("manifest digest mismatch: expected {expected}, got {actual}")]
+    ManifestDigestMismatch {
+        /// Expected manifest digest from the pinned reference.
+        expected: String,
+        /// Actual manifest or index digest returned by the registry.
+        actual: String,
+    },
+
     /// Layer materialization failed.
     #[error("materialization failed for layer {digest}: {message}")]
     Materialize {
