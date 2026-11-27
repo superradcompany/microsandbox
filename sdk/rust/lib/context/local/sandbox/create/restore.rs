@@ -618,14 +618,15 @@ esac
         let reference = format!("{}/fixture:mutable-tag", listener.local_addr().unwrap());
         let digest = format!("sha256:{}", "a".repeat(64));
         let cache = GlobalCache::new(&backend.cache_dir()).unwrap();
-        cache.write_image_metadata_async(&reference.parse().unwrap(), &CachedImageMetadata {
+        cache.write_image_metadata_with_provenance_async(&reference.parse().unwrap(), &CachedImageMetadata {
             manifest_digest: digest.clone(),
             config_digest: format!("sha256:{}", "b".repeat(64)),
             raw_manifest_json: r#"{"schemaVersion":2,"layers":[]}"#.into(),
             raw_config_json: r#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#.into(),
             config: ImageConfig::default(),
             layers: Vec::new(),
-        }).await.unwrap();
+
+        }, microsandbox_image::CacheAuthProvenance::Anonymous).await.unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let observed = requests.clone();
         let server = tokio::spawn(async move {
@@ -665,6 +666,8 @@ esac
                         insecure: true,
                         ..Default::default()
                     },
+                    None,
+                    false,
                     RootfsMaterialization::Flat,
                     None,
                 )
@@ -686,6 +689,8 @@ esac
                     insecure: true,
                     ..Default::default()
                 },
+                None,
+                false,
                 RootfsMaterialization::Flat,
                 None,
             ),
@@ -834,6 +839,7 @@ esac
                 None,
                 &Default::default(),
                 Default::default(),
+                None,
             )
             .await
         {
@@ -998,6 +1004,7 @@ esac
                 None,
                 &Default::default(),
                 Default::default(),
+                None,
             )
             .await
             .unwrap();

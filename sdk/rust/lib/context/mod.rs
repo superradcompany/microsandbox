@@ -14,6 +14,8 @@ pub(crate) mod local;
 #[cfg(feature = "local")]
 pub(crate) use local::ControlSession;
 mod misconfigured;
+#[cfg(test)]
+pub(crate) use misconfigured::ConfigurationErrorBackend;
 mod profile;
 pub(crate) mod sandbox;
 mod service;
@@ -47,7 +49,7 @@ pub use microsandbox_types::{
 
 pub use profile::{
     Profile, ProfileKind, configured_context, configured_provider_kind, resolve_cli_context,
-    resolve_default_backend,
+    resolve_context, resolve_default_backend,
 };
 pub use sandbox::{
     SandboxIdentity, SandboxInner, SandboxOps, SandboxRecordCloudState, SandboxRecordInner,

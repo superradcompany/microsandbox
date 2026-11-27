@@ -84,6 +84,8 @@ export declare class Context {
   constructor(optionsJson: string)
   /** Derive inside the retained provider; credentials never cross back into JavaScript. */
   deriveRemote(optionsJson: string): Context
+  /** Metadata belongs to this context, never a newly resolved default. */
+  get infoJson(): string
   get kind(): string
   sandboxBuilder(name: string): JsSandboxBuilder
   sandboxGet(name: string): Promise<Sandbox>
@@ -2107,6 +2109,9 @@ export interface CheckpointCaptureResult {
   checkpoint: Snapshot
   headUpdate: HeadUpdate
 }
+
+/** Resolve configuration without starting a VM or making a remote request. */
+export declare function configuredContext(): Context
 
 /** Read selection before choosing a provider-specific native library. */
 export declare function configuredProviderKind(): string

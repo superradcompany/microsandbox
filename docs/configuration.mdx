@@ -319,7 +319,7 @@ User OCI defaults apply to local creation. Managed root-disk settings also apply
 
 `root_disk` and `upper_size_mib` are mutually exclusive. For a portable flat default, use `clone: "auto"`; it attempts a native reflink and safely falls back to a sparse copy. Use `clone: "reflink"` only when failure is preferable to copying on a host filesystem without reflink support.
 
-When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reusable flat artifact. An explicit `msb pull IMAGE --materialize layered|flat|all` always wins.
+When the root-disk default is flat, both `msb pull IMAGE` and `msb load` prepare a reusable flat root. Pass `--materialize layered|flat|all` to either command to override the configured layout.
 
 ## `runtime`
 
@@ -327,8 +327,25 @@ When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reu
 
 | Field | Default | Description |
 |-------|---------|-------------|
+| `strict_host_files` | `false` | Reject symlinks when the SDK opens sandbox log files and disk-image locks. Enabled automatically on Unix when `deployment_profile` is `"multi-tenant"`. Paths beneath `home` are anchored at `home` so OS symlinks above `home` (such as `/var` on macOS) remain valid. Unix only. |
+| `patches` | `{ "stage": false, ... }` | Host-copy patch staging and resource-limit policy. Enabled automatically on Unix when `deployment_profile` is `"multi-tenant"`. When `stage` is `true`, host-copy patches are staged before applying the batch, rejecting special files and any symlink in a copy source path (including parent directories such as `/tmp`, `/var`, and `/etc` on macOS). Limits default to `max_bytes: 67108864` (64 MiB), `max_entries: 4096`, `max_depth: 32`, and `max_concurrent_batches: 2` per backend; set any limit to `null` to disable that cap independently. Unix only; Linux (kernel 5.6+ with `/proc`) pins inodes with `O_PATH` before opening, whereas macOS lacks `O_PATH` so a concurrent rename can briefly open a swapped special file with `O_NONBLOCK` before rejecting it. |
 | `block_writeback` | `{ "mode": "auto" }` | Buffered host writeback containment and live pressure sharing on Linux. Pool pressure never rejects sandbox creation; unconfigured `auto` is a no-op on other hosts. |
 | `placement_profiles` | `{}` | Host-owned named CPU and NUMA placement profiles selectable by sandboxes |
+
+### `runtime.strict_host_files`
+
+When enabled, the SDK refuses to follow a symlink anywhere in these host paths, and the paths cannot contain `..`. Existing symlinked paths keep working while it is off. Setting it on a non-Unix host fails backend construction.
+
+- Reads of a sandbox's `exec.log`, `runtime.log`, and `kernel.log`, including rotated `exec.log` files.
+- The lock opened at launch on each disk-image root filesystem, writable OCI root disk, disk-image mount, and disk volume.
+
+<Accordion title="Coverage limits and older releases">
+
+The setting applies only to those opens. The runtime opens each disk image again by path when the VM starts and follows symlinks, so a path changed after the lock is taken is not detected. Boot-error records, directory mounts, and other host files are read without it.
+
+Releases without this setting ignore it. They also drop unknown fields when they save `config.json`, for example while updating registry credentials, which turns the setting off for every release. A [managed](/enterprise/managed-configuration) value is never rewritten this way, though older releases still do not enforce it.
+
+</Accordion>
 
 ### `runtime.placement_profiles`
 
@@ -466,6 +483,9 @@ For local pulls without managed `auth`, microsandbox resolves credentials in thi
 | Field | Default | Description |
 |-------|---------|-------------|
 | `max_filesystem_state_mib` | `4` | Largest virtio-fs backend state, in MiB, that one filesystem device can carry through a full snapshot. Valid values are `1` through `4095`. |
+| `copy_files` | `false` | Give files that new snapshots, restored sandboxes, and branched sandboxes keep their own inodes instead of hardlinks. Enabled automatically when `deployment_profile` is `"multi-tenant"`. Copies preserve sparse extents and may use reflinks. Files copied instead of hardlinked by this setting are owner-only on Linux and macOS. |
+
+With `copy_files` enabled, the files a new artifact or sandbox keeps do not share inodes with their source. This can increase storage use and copy time. Temporary handoff files for a live branch stay hardlinked to the source sandbox until the branch is created. The default keeps hardlink optimizations. It does not change snapshot formats or eager memory restore, and it does not remove hardlinks already present in existing artifacts.
 
 This limit applies per filesystem device during capture, verification, export, import, restore, and live forks.
 

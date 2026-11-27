@@ -45,10 +45,13 @@ pub mod tree;
 
 pub use archive::{
     ImageArchiveFormat, ImageLoadOptions, ImageSaveConfig, ImageSaveLayer, ImageSaveRequest,
-    LoadedImage, load_archive, load_archive_into, load_archive_with, save_archive,
-    save_docker_archive,
+    LoadedImage, load_archive, load_archive_into, load_archive_with,
+    load_archive_with_materialization, save_archive, save_docker_archive,
 };
-pub use cache::{CachedImageMetadata, CachedLayerMetadata, FlatRootfsRef, GlobalCache};
+pub use cache::{
+    CacheAuthProvenance, CachedImageMetadata, CachedLayerMetadata, FlatRootfsRef, GlobalCache,
+    ImageMetadataInstall, image_metadata_json_equivalent,
+};
 pub use config::ImageConfig;
 pub use digest::Digest;
 pub use error::{ImageError, ImageResult};

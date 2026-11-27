@@ -11,6 +11,7 @@ from typing import Any, Literal
 from microsandbox.inspection import SandboxConfigInspection
 from microsandbox.jobs import JobEvent, JobExit, JobInfo, JobLogEntry, JobOutputSource, JobPage
 from microsandbox.types import (
+    ContextInfo,
     ContextKind,
     CpuPlacement,
     DeploymentProfile,
@@ -1628,10 +1629,14 @@ class SnapshotRemoveResult:
 
 async def diagnose_storage(config_json: str, selection_json: str) -> str: ...
 
+def configured_context() -> Context: ...
+
 class Context:
     def __new__(cls, options_json: str, base: Context | None = None) -> Context: ...
     @property
     def kind(self) -> ContextKind: ...
+    @property
+    def info(self) -> ContextInfo: ...
     @property
     def sandboxes(self) -> Sandboxes: ...
     @property

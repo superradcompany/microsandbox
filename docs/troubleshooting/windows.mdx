@@ -72,6 +72,12 @@ where.exe msb
 
 If an error mentions `libkrunfw.so` or `libkrunfw.dylib`, clear any old Unix/macOS override in `MSB_LIBKRUNFW_PATH` or `config.json`, or point it at `libkrunfw.dll`.
 
+## Storage on a shared drive
+
+You can run a sandbox with TLS interception when your `MSB_HOME` is on a shared NTFS drive, including when `Authenticated Users` inherits Modify on a folder such as `G:\.dev`. For new credentials, microsandbox uses a private directory under `%LOCALAPPDATA%\microsandbox-credentials` when the data drive cannot protect the signing key. Each storage home and catalog has a separate key directory. Your drive and folder permissions are preserved.
+
+Keep the Windows profile when you need to restart these sandboxes or restore snapshots that contain a locally sealed TLS identity. Existing keys in a protected `MSB_HOME` keep their original location. If permissions change around an existing key, restore protection to that location to use the key again. Use a CLI that supports profile-backed credentials to capture or remove sandboxes created with this layout.
+
 ## Updates and reinstalls
 
 `msb self update` stages and verifies the new Windows release before scheduling the installed files for replacement. The command can exit while another `msb` or `microsandbox` process still has an executable locked. The background task keeps retrying and writes its progress to the log path printed by the command.

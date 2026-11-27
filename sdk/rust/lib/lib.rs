@@ -6,6 +6,7 @@
 #[cfg(doctest)]
 mod api_boundary;
 mod error;
+mod host_file;
 #[cfg(test)]
 mod test_support;
 #[cfg(any(feature = "local", feature = "cloud"))]
@@ -48,7 +49,7 @@ pub use context::{
     ContextInfo, ContextKind, ContextSelectionSource, Profile, ProfileKind, SandboxInner,
     SandboxOps, SandboxRecordCloudState, SandboxRecordInner, SandboxRemoteState, Sandboxes,
     ServiceOps, Snapshots, VolumeInner, VolumeOps, VolumeRemoteState, Volumes, configured_context,
-    default_local_context, resolve_default_backend,
+    default_local_context, resolve_context, resolve_default_backend,
 };
 /// Previous name for [`ComputeType`].
 #[deprecated(note = "use ComputeType instead")]

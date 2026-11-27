@@ -1,9 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Sandbox } from "../dist/index.js";
 import { msbPath } from "../dist/internal/resolve-binary.js";
 import type { PullProgress, SecretModifySpec } from "../dist/index.js";
 
-const SANDBOX_NAME = "sdk-smoke-test";
+const SANDBOX_NAME = `sdk-smoke-${randomUUID()}`;
 
 
 async function waitForSandboxMetrics(sb: Sandbox) {
@@ -40,7 +41,6 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
       .label("setup_db", "one").label("setupDb", "two")
       .script("setup_db", "echo one").script("setupDb", "echo two")
       .network(n => n.secretEnvSimple("SDK_SECRET_TOKEN", "dummy-private-value", "example.com"))
-      .replace()
       .create();
   });
 

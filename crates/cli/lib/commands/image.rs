@@ -1,7 +1,7 @@
 //! `msb image` command — manage OCI images.
 
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
@@ -84,6 +84,13 @@ pub struct ImageLoadArgs {
     #[arg(short, long, value_name = "PATH")]
     pub input: Option<PathBuf>,
 
+    /// Rootfs representations to prepare from the archive.
+    ///
+    /// When omitted, a configured flat OCI root disk selects flat materialization.
+    /// Otherwise the default is layered.
+    #[arg(long, value_enum)]
+    pub materialize: Option<pull::PullMaterialization>,
+
     /// Add a local image reference to the first imported image.
     #[arg(short, long, value_name = "REF")]
     pub tag: Vec<String>,
@@ -144,6 +151,11 @@ pub struct ImagePruneArgs {
     /// Do not prompt for confirmation.
     #[arg(short = 'y', long)]
     pub yes: bool,
+
+    /// Path to a file listing OCI image references to exclude from pruning (one per line).
+    /// Can be specified multiple times.
+    #[arg(long = "exclude-from", value_name = "PATH")]
+    pub exclude_from: Vec<PathBuf>,
 
     /// Output format (json).
     #[arg(long, value_name = "FORMAT", value_enum)]
@@ -229,7 +241,7 @@ async fn run_pull_inner(
     let backend = crate::commands::common::local_backend_ref(&backend)?;
     let backend_config = backend.config();
     let oci_defaults = &backend_config.sandbox_defaults.oci;
-    let materialization = resolve_pull_materialization(materialization, oci_defaults)?;
+    let materialization = resolve_materialization(materialization, oci_defaults)?;
     let cache = microsandbox_image::GlobalCache::new(&backend.cache_dir())?.operation();
     let platform = microsandbox_image::Platform::host_linux();
     let image_ref: microsandbox_image::Reference = reference
@@ -242,8 +254,13 @@ async fn run_pull_inner(
         materialization: materialization.image_materialization(),
     };
 
-    if let Some((result, metadata)) =
-        microsandbox_image::Registry::pull_cached_async(&cache, &image_ref, &options).await?
+    let has_explicit_auth = explicit_auth
+        .as_ref()
+        .is_some_and(|auth| !matches!(auth, microsandbox_image::RegistryAuth::Anonymous));
+
+    if !has_explicit_auth
+        && let Some((result, metadata)) =
+            microsandbox_image::Registry::pull_cached_async(&cache, &image_ref, &options).await?
     {
         Image::persist(backend, &reference, metadata).await?;
 
@@ -300,19 +317,15 @@ async fn run_pull_inner(
         .add_insecure_registries(config.insecure_registries)
         .build()?;
 
-    let task = registry.pull_with_sender(&image_ref, &options, sender);
-
-    let result = match task.await {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => {
+    let pulled = registry
+        .pull_with_metadata(&image_ref, &options, Some(sender))
+        .await;
+    let (result, metadata) = match pulled {
+        Ok(pulled) => pulled,
+        Err(error) => {
             let _ = display_thread.join();
             pull_failure_line(quiet, &reference);
-            return Err(e.into());
-        }
-        Err(e) => {
-            let _ = display_thread.join();
-            pull_failure_line(quiet, &reference);
-            return Err(anyhow::anyhow!("pull task panicked: {e}"));
+            return Err(error.into());
         }
     };
 
@@ -326,12 +339,7 @@ async fn run_pull_inner(
         }
     }
 
-    // Persist before the registry's operation scope releases the published artifacts.
-    let cache = microsandbox_image::GlobalCache::new(&backend.cache_dir())?.operation();
-    let metadata = cache
-        .read_image_metadata_async(&image_ref)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("image metadata missing after pull: {reference}"))?;
+    // Keep the image operation alive while indexing the exact admitted generation.
     Image::persist(backend, &reference, metadata).await?;
 
     if !quiet {
@@ -370,6 +378,86 @@ pub(crate) async fn pull_if_missing(
     pull_if_missing_with_auth(reference, quiet, materialization, None).await
 }
 
+/// Repair the immutable layered backing for a stopped local sandbox.
+pub(crate) async fn repair_pinned_root(
+    reference: &str,
+    digest: &str,
+    quiet: bool,
+) -> anyhow::Result<()> {
+    let backend = crate::commands::common::resolve_local_backend()?;
+    let local = crate::commands::common::local_backend_ref(&backend)?;
+    let cache = microsandbox_image::GlobalCache::new(&local.cache_dir())?.operation();
+    let original: microsandbox_image::Reference = reference.parse()?;
+    let manifest: microsandbox_image::Digest = digest.parse()?;
+    let pinned = microsandbox_image::Reference::with_digest(
+        original.registry().to_owned(),
+        original.repository().to_owned(),
+        digest.to_owned(),
+    );
+    cache
+        .lease_paths_async(vec![cache.fsmeta_erofs_path(&manifest)])
+        .await?;
+    let mut found_pinned_metadata = false;
+    for reference in [&pinned, &original] {
+        if let Some(metadata) = cache.read_image_metadata_async(reference).await?
+            && metadata.manifest_digest == digest
+        {
+            found_pinned_metadata = true;
+            let diff_ids = metadata
+                .layers
+                .iter()
+                .map(|layer| layer.diff_id.parse())
+                .collect::<Result<Vec<_>, _>>()?;
+            if cache.is_vmdk_complete_for_layers(&manifest, &diff_ids) {
+                return Ok(());
+            }
+            if cache.is_fsmeta_materialized(&manifest) && cache.all_layers_materialized(&diff_ids) {
+                cache.rewrite_vmdk_async(&manifest, &diff_ids).await?;
+                return Ok(());
+            }
+        }
+    }
+    if !found_pinned_metadata && cache.is_vmdk_complete(&manifest) {
+        return Ok(());
+    }
+
+    // Query the exact upstream manifest if any backing layer needs to be recovered.
+    run_pull_inner(
+        pinned.whole(),
+        false,
+        quiet,
+        false,
+        None,
+        microsandbox_image::PullPolicy::Always,
+        PullOverrides {
+            materialization: Some(pull::PullMaterialization::Layered),
+            explicit_auth: None,
+        },
+    )
+    .await?;
+    let metadata = cache
+        .read_image_metadata_async(&pinned)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("pinned image metadata missing after pull: {pinned}"))?;
+    anyhow::ensure!(
+        metadata.manifest_digest == digest,
+        "registry returned a different manifest for {pinned}"
+    );
+    let layers = metadata
+        .layers
+        .iter()
+        .map(|layer| layer.diff_id.parse())
+        .collect::<Result<Vec<_>, _>>()?;
+    if !cache.is_vmdk_complete_for_layers(&manifest, &layers) {
+        cache.rewrite_vmdk_async(&manifest, &layers).await?;
+    }
+    anyhow::ensure!(
+        cache.is_vmdk_complete_for_layers(&manifest, &layers),
+        "incomplete OCI backing for {pinned}"
+    );
+    Ok(())
+}
+
 /// Pull an image if missing, honoring an explicit per-sandbox registry credential.
 pub(crate) async fn pull_if_missing_with_auth(
     reference: &str,
@@ -394,8 +482,13 @@ pub(crate) async fn pull_if_missing_with_auth(
         materialization: materialization.image_materialization(),
     };
 
-    if let Some((_, metadata)) =
-        microsandbox_image::Registry::pull_cached_async(&cache, &image_ref, &options).await?
+    let has_explicit_auth = explicit_auth
+        .as_ref()
+        .is_some_and(|auth| !matches!(auth, microsandbox_image::RegistryAuth::Anonymous));
+
+    if !has_explicit_auth
+        && let Some((_, metadata)) =
+            microsandbox_image::Registry::pull_cached_async(&cache, &image_ref, &options).await?
     {
         Image::persist(local, reference, metadata).await?;
         return Ok(());
@@ -605,6 +698,8 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
 pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
     let backend = crate::commands::common::resolve_local_backend()?;
     let local = crate::commands::common::local_backend_ref(&backend)?;
+    let materialization =
+        resolve_materialization(args.materialize, &local.config().sandbox_defaults.oci)?;
     let cache_dir = local.cache_dir();
     // Start the progress display before reading the archive, so a piped
     // `docker save | msb load` shows activity while stdin is consumed.
@@ -647,13 +742,14 @@ pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
     };
 
     let cache_operation = microsandbox_image::GlobalCache::new(&cache_dir)?;
-    let loaded = microsandbox_image::load_archive_with(
+    let loaded = microsandbox_image::load_archive_with_materialization(
         &cache_operation,
         input_path,
         ImageLoadOptions {
             tags: args.tag.clone(),
             progress: Some(sender),
         },
+        materialization.image_materialization(),
         |image| async move {
             Image::persist(local, &image.reference, image.metadata)
                 .await
@@ -746,6 +842,7 @@ pub async fn run_remove(args: ImageRemoveArgs) -> anyhow::Result<()> {
 
 /// Execute `msb image prune`.
 pub async fn run_prune(args: ImagePruneArgs) -> anyhow::Result<()> {
+    let excluded_refs = load_exclude_from_files(&args.exclude_from)?;
     let backend = crate::commands::common::resolve_local_backend()?;
     let local = crate::commands::common::local_backend_ref(&backend)?;
 
@@ -767,7 +864,7 @@ pub async fn run_prune(args: ImagePruneArgs) -> anyhow::Result<()> {
         }
     }
 
-    let report = Image::prune_local(local).await?;
+    let report = Image::prune_local_with_keep(local, &excluded_refs).await?;
 
     if args.format == Some(OutputFormat::Json) {
         let json = serde_json::json!({
@@ -846,7 +943,7 @@ fn pull_failure_line(quiet: bool, reference: &str) {
     }
 }
 
-fn resolve_pull_materialization(
+fn resolve_materialization(
     requested: Option<pull::PullMaterialization>,
     defaults: &microsandbox::config::OciSandboxDefaults,
 ) -> anyhow::Result<pull::PullMaterialization> {
@@ -876,6 +973,43 @@ fn resolve_pull_materialization(
     }))
 }
 
+/// Load and validate OCI image references from one or more `--exclude-from` files.
+fn load_exclude_from_files(paths: &[PathBuf]) -> anyhow::Result<Vec<String>> {
+    let mut excluded_refs = Vec::new();
+    for path in paths {
+        let content = std::fs::read_to_string(path).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to read --exclude-from file '{}': {error}",
+                path.display()
+            )
+        })?;
+        excluded_refs.extend(parse_exclude_from_file(&content, path)?);
+    }
+    Ok(excluded_refs)
+}
+
+/// Parse a line-oriented `--exclude-from` file, ignoring blank lines and `#`
+/// comments, and normalizing each entry with the OCI reference parser.
+fn parse_exclude_from_file(content: &str, path: &Path) -> anyhow::Result<Vec<String>> {
+    let mut refs = Vec::new();
+    for (index, raw_line) in content.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parsed: microsandbox_image::Reference = line.parse().map_err(|error| {
+            anyhow::anyhow!(
+                "invalid image reference in --exclude-from file '{}' at line {}: '{}': {error}",
+                path.display(),
+                index + 1,
+                line
+            )
+        })?;
+        refs.push(parsed.to_string());
+    }
+    Ok(refs)
+}
+
 /// Truncate a digest to a short form (first 12 hex chars after algorithm prefix).
 fn truncate_digest(digest: &str) -> String {
     if let Some(hex) = digest.strip_prefix("sha256:") {
@@ -894,7 +1028,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pull_materialization_inherits_flat_only_when_not_explicit() {
+    fn materialization_inherits_flat_only_when_not_explicit() {
         let defaults = microsandbox::config::OciSandboxDefaults {
             upper_size_mib: None,
             root_disk: Some(microsandbox::sandbox::RootDisk::Flat {
@@ -905,13 +1039,83 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_pull_materialization(None, &defaults).unwrap(),
+            resolve_materialization(None, &defaults).unwrap(),
             pull::PullMaterialization::Flat
         );
         assert_eq!(
-            resolve_pull_materialization(Some(pull::PullMaterialization::Layered), &defaults)
-                .unwrap(),
+            resolve_materialization(Some(pull::PullMaterialization::Layered), &defaults).unwrap(),
             pull::PullMaterialization::Layered
+        );
+    }
+
+    #[test]
+    fn parse_exclude_from_file_ignores_blank_lines_comments_and_whitespace() {
+        let content = "\
+            # Pre-warmed images\n\
+            \n\
+               \t  \n\
+              alpine:3.20  \n\
+              # Indented comment\n\
+            \tpython:3.12-slim\r\n\
+            ghcr.io/microsandbox/node:22\n\
+        ";
+
+        let parsed = parse_exclude_from_file(content, Path::new("exclude.txt")).unwrap();
+
+        assert_eq!(
+            parsed,
+            vec![
+                "docker.io/library/alpine:3.20",
+                "docker.io/library/python:3.12-slim",
+                "ghcr.io/microsandbox/node:22",
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_exclude_from_file_rejects_invalid_reference_with_line_number() {
+        let content = "alpine:3.20\n\nINVALID:::REF!!!\n";
+        let err = parse_exclude_from_file(content, Path::new("exclude.txt")).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("exclude.txt"), "{message}");
+        assert!(message.contains("line 3"), "{message}");
+    }
+
+    #[test]
+    fn load_exclude_from_files_fails_on_missing_or_unreadable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.txt");
+
+        let err = load_exclude_from_files(std::slice::from_ref(&missing)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("failed to read --exclude-from file")
+        );
+
+        let dir_err = load_exclude_from_files(&[dir.path().to_path_buf()]).unwrap_err();
+        assert!(
+            dir_err
+                .to_string()
+                .contains("failed to read --exclude-from file")
+        );
+    }
+
+    #[test]
+    fn load_exclude_from_files_combines_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        std::fs::write(&first, "alpine:3.20\n").unwrap();
+        std::fs::write(&second, "python:3.12-slim\n").unwrap();
+
+        let loaded = load_exclude_from_files(&[first, second]).unwrap();
+        assert_eq!(
+            loaded,
+            vec![
+                "docker.io/library/alpine:3.20",
+                "docker.io/library/python:3.12-slim",
+            ]
         );
     }
 }

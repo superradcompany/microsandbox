@@ -7,6 +7,16 @@
 
 use std::ffi::CString;
 use std::fmt;
+#[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
+use std::io;
+#[cfg(unix)]
+use std::mem::{offset_of, size_of};
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(unix)]
+use std::ptr;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
@@ -49,6 +59,7 @@ use windows_sys::Win32::System::Threading::{
 const INIT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const INIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const QUIESCE_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
+const SEQLOCK_READ_ATTEMPTS: usize = 4096;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -279,30 +290,41 @@ impl Drop for MappedRegion {
 impl GuestMemoryValidity {
     /// Whether this allocation still holds a valid report from the same lifecycle.
     /// New reports in that lifecycle do not invalidate an unexpired older sample.
-    /// Busy, stopped, reused or unsupported slots fail closed without waiting.
+    /// Retries briefly across concurrent seqlock writes, then fails closed if the
+    /// slot remains busy, stopped, reused, or unsupported.
     pub fn is_current(&self) -> bool {
         let slot = self.registry.slot(self.slot);
-        let before = slot.seq.load(Ordering::Acquire);
-        if before & 1 != 0 {
-            return false;
-        }
-        let generation = slot.generation.load(Ordering::Relaxed);
-        let state = slot.state.load(Ordering::Relaxed);
-        let flags = slot.sample_flags.load(Ordering::Relaxed);
-        let epoch = slot.memory_epoch.load(Ordering::Relaxed);
-        let pid = slot.pid.load(Ordering::Relaxed);
-        let after = slot.seq.load(Ordering::Acquire);
         let required = SAMPLE_FLAG_GUEST_MEMORY_LIFECYCLE
             | SAMPLE_FLAG_GUEST_MEMORY_OBSERVATION
             | SAMPLE_FLAG_GUEST_MEMORY_VALID;
-        before == after
-            && generation == self.generation
-            && slot.generation.load(Ordering::Acquire) == self.generation
-            && state == SLOT_ACTIVE
-            && slot.state.load(Ordering::Acquire) == SLOT_ACTIVE
-            && flags & required == required
-            && epoch == self.epoch
-            && pid_is_alive(pid)
+
+        for _ in 0..SEQLOCK_READ_ATTEMPTS {
+            let before = slot.seq.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let generation = slot.generation.load(Ordering::Relaxed);
+            let state = slot.state.load(Ordering::Relaxed);
+            let flags = slot.sample_flags.load(Ordering::Relaxed);
+            let epoch = slot.memory_epoch.load(Ordering::Relaxed);
+            let pid = slot.pid.load(Ordering::Relaxed);
+            let after = slot.seq.load(Ordering::Acquire);
+            if before != after || after & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+
+            return generation == self.generation
+                && slot.generation.load(Ordering::Acquire) == self.generation
+                && state == SLOT_ACTIVE
+                && slot.state.load(Ordering::Acquire) == SLOT_ACTIVE
+                && flags & required == required
+                && epoch == self.epoch
+                && pid_is_alive(pid);
+        }
+
+        false
     }
 }
 
@@ -375,6 +397,157 @@ impl MetricsRegistry {
         let reg = try_open_existing(&cname, capacity, map_len)?
             .ok_or_else(|| MetricsError::Custom("registry disappeared during open".into()))?;
         Ok(reg)
+    }
+
+    /// Open an existing single-slot registry file for in-place shared-memory updates.
+    ///
+    /// Rejects symlinks, non-regular files, and files whose length does not match
+    /// a single-slot registry.
+    #[cfg(target_os = "linux")]
+    pub fn open_file(path: &std::path::Path) -> MetricsResult<Self> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let map_len = registry_size(1);
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() != map_len as u64 {
+            return Err(MetricsError::Custom("invalid file registry size".into()));
+        }
+        if std::os::unix::fs::MetadataExt::uid(&metadata) != unsafe { libc::geteuid() } {
+            return Err(MetricsError::Custom(
+                "private metrics registry file is not owned by the current user".into(),
+            ));
+        }
+
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                map_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        drop(file);
+        if ptr == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error().into());
+        }
+
+        let mapping = MappedRegion {
+            ptr: NonNull::new(ptr as *mut u8).expect("mmap returned non-null"),
+            len: map_len,
+        };
+        let header = unsafe { &*(mapping.ptr.as_ptr() as *const Header) };
+        match wait_for_ready(header) {
+            Ok(()) => validate_header(header, Some(1))?,
+            Err(WaitForReadyError::Stuck) => {
+                return Err(MetricsError::Custom(
+                    "metrics registry is still initializing".into(),
+                ));
+            }
+            Err(WaitForReadyError::Invalid(state)) => {
+                return Err(MetricsError::Custom(format!(
+                    "invalid registry header state: {state}"
+                )));
+            }
+        }
+
+        let cname = CString::new(path.to_string_lossy().as_bytes())
+            .unwrap_or_else(|_| CString::new("/private-metrics").expect("static cstring"));
+        Ok(Self {
+            inner: Arc::new(RegistryInner {
+                name: cname,
+                mapping,
+                capacity: 1,
+            }),
+        })
+    }
+
+    /// Read a one-slot registry file into an independent in-memory snapshot.
+    ///
+    /// The source file is never memory-mapped. Truncating or replacing it after
+    /// this call cannot invalidate the returned snapshot. Invalid sizes and
+    /// layouts are rejected; a busy writer is retried at most four times.
+    /// Only the current registry ABI is accepted. Existing named-registry readers
+    /// keep their compatibility behavior; this adds no writer format.
+    ///
+    /// Producer and reader must share a PID namespace: subsequent snapshot reads
+    /// use the recorded PID for the usual dead-owner checks. Mutating the returned
+    /// registry changes only this private copy, never the source file.
+    #[cfg(unix)]
+    pub fn read_file_snapshot(file: &File) -> MetricsResult<Self> {
+        const SEQ_OFFSET: usize = offset_of!(Slot, seq);
+        const PREFIX_LEN: usize = SEQ_OFFSET + size_of::<AtomicU64>();
+
+        let length = registry_size(1);
+
+        for _ in 0..4 {
+            if file.metadata()?.len() != length as u64 {
+                return Err(MetricsError::Custom("invalid file registry size".into()));
+            }
+
+            let mut before = [0u8; PREFIX_LEN];
+            file.read_exact_at(&mut before, HEADER_SIZE as u64)?;
+            let seq = u64::from_ne_bytes(before[SEQ_OFFSET..PREFIX_LEN].try_into().unwrap());
+            if seq & 1 != 0 {
+                continue;
+            }
+
+            let mut bytes = vec![0u8; length];
+            file.read_exact_at(&mut bytes, 0)?;
+
+            let mut after = [0u8; PREFIX_LEN];
+            file.read_exact_at(&mut after, HEADER_SIZE as u64)?;
+            if before != after || before != bytes[HEADER_SIZE..HEADER_SIZE + PREFIX_LEN] {
+                continue;
+            }
+
+            // The mapping is anonymous and private. Only the bounded byte copy is
+            // untrusted; subsequent reads cannot SIGBUS after a source file resize.
+            let ptr = unsafe {
+                libc::mmap(
+                    ptr::null_mut(),
+                    length,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            if ptr == libc::MAP_FAILED {
+                return Err(io::Error::last_os_error().into());
+            }
+
+            let mapping = MappedRegion {
+                ptr: NonNull::new(ptr.cast()).unwrap(),
+                len: length,
+            };
+            unsafe {
+                ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), length);
+            }
+
+            let header = unsafe { &*mapping.ptr.as_ptr().cast::<Header>() };
+            validate_header(header, Some(1))?;
+            if header.state.load(Ordering::Acquire) != HEADER_STATE_READY {
+                return Err(MetricsError::Custom("file registry is not ready".into()));
+            }
+
+            return Ok(Self {
+                inner: Arc::new(RegistryInner {
+                    name: CString::new("file-snapshot").unwrap(),
+                    mapping,
+                    capacity: 1,
+                }),
+            });
+        }
+
+        Err(MetricsError::Custom("file registry writer is busy".into()))
     }
 
     /// Reserve a slot for an upcoming sandbox spawn.
@@ -788,7 +961,7 @@ impl MetricsRegistry {
         // can complete a full cycle in <100 ns, so we need a generous budget
         // before giving up. 4096 attempts is still cheap (<1 ms in the worst
         // case) and effectively unbounded in practice.
-        for _ in 0..4096 {
+        for _ in 0..SEQLOCK_READ_ATTEMPTS {
             let state = slot.state.load(Ordering::Acquire);
             if !slot_visible(state, include_stale) {
                 return None;
@@ -2240,6 +2413,195 @@ mod tests {
         cleanup(&name);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn file_snapshot_survives_source_changes_and_rejects_invalid_input() {
+        use std::io::Write;
+        use std::slice;
+
+        let name = unique_name("file");
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let reservation = registry
+            .reserve(ReserveSlot {
+                sandbox_id: 7,
+                name: "alpine",
+                memory_limit_bytes: 1024,
+            })
+            .unwrap();
+        let writer = registry
+            .activate_writer(ActivateSlot {
+                slot: reservation.slot,
+                generation: reservation.generation,
+                run_id: 19,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&writer, 123);
+
+        // Save bytes emitted by the actual registry writer, not a fabricated receipt.
+        let bytes =
+            unsafe { slice::from_raw_parts(registry.inner.mapping.ptr.as_ptr(), registry_size(1)) }
+                .to_vec();
+        cleanup(&name);
+
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&bytes).unwrap();
+
+        let snapshot = MetricsRegistry::read_file_snapshot(&file).unwrap();
+        file.set_len(0).unwrap();
+
+        let sample = snapshot.identified_at(0, true).unwrap();
+        assert_eq!(sample.metric.sandbox_id, 7);
+        assert_eq!(sample.metric.run_id, 19);
+        assert_eq!(sample.metric.memory_bytes, 123);
+        assert!(MetricsRegistry::read_file_snapshot(&file).is_err());
+
+        file.write_all_at(&bytes, 0).unwrap();
+        file.write_all_at(
+            &1_u64.to_ne_bytes(),
+            (HEADER_SIZE + offset_of!(Slot, seq)) as u64,
+        )
+        .unwrap();
+        assert!(
+            MetricsRegistry::read_file_snapshot(&file).is_err(),
+            "busy source was accepted"
+        );
+
+        file.write_all_at(&bytes, 0).unwrap();
+        file.write_all_at(
+            &HEADER_STATE_INITIALIZING.to_ne_bytes(),
+            offset_of!(Header, state) as u64,
+        )
+        .unwrap();
+        assert!(
+            MetricsRegistry::read_file_snapshot(&file).is_err(),
+            "initializing header was accepted"
+        );
+
+        file.write_all_at(&bytes, 0).unwrap();
+        file.write_all_at(&0_u64.to_ne_bytes(), 0).unwrap();
+        assert!(
+            MetricsRegistry::read_file_snapshot(&file).is_err(),
+            "bad header was accepted"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_snapshots_remain_coherent_while_a_mapped_producer_writes() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        use std::slice;
+        use std::sync::atomic::AtomicBool;
+
+        let name = unique_name("fp");
+        let template = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let length = registry_size(1);
+        let bytes = unsafe { slice::from_raw_parts(template.inner.mapping.ptr.as_ptr(), length) };
+
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(bytes).unwrap();
+        cleanup(&name);
+        drop(template);
+
+        let ptr = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                length,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(ptr, libc::MAP_FAILED);
+
+        let producer = MetricsRegistry {
+            inner: Arc::new(RegistryInner {
+                name: CString::new("mapped-file-producer").unwrap(),
+                mapping: MappedRegion {
+                    ptr: NonNull::new(ptr.cast()).unwrap(),
+                    len: length,
+                },
+                capacity: 1,
+            }),
+        };
+        let reservation = producer
+            .reserve(ReserveSlot {
+                sandbox_id: 1,
+                name: "file-pressure",
+                memory_limit_bytes: 1024,
+            })
+            .unwrap();
+        let writer = producer
+            .activate_writer(ActivateSlot {
+                slot: reservation.slot,
+                generation: reservation.generation,
+                run_id: 1,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&writer, 0);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_stop = stop.clone();
+        let writing = thread::spawn(move || {
+            let slot = writer.registry.slot(writer.slot);
+            let mut count = 0;
+
+            while !writer_stop.load(Ordering::Acquire) {
+                count += 1;
+                // Use the published seqlock, with a deliberate long partial update
+                // so a file read must distinguish completed and incomplete samples.
+                slot.seq.fetch_add(1, Ordering::AcqRel);
+                slot.memory_bytes.store(count, Ordering::Relaxed);
+                thread::yield_now();
+                slot.disk_read_bytes.store(count, Ordering::Relaxed);
+                slot.disk_write_bytes.store(count, Ordering::Relaxed);
+                slot.net_rx_bytes.store(count, Ordering::Relaxed);
+                slot.net_tx_bytes.store(count, Ordering::Relaxed);
+                slot.seq.fetch_add(1, Ordering::Release);
+                thread::yield_now();
+            }
+        });
+
+        let mut accepted = 0;
+        let mut inconsistent = None;
+
+        for _ in 0..30_000 {
+            let Ok(snapshot) = MetricsRegistry::read_file_snapshot(&file) else {
+                continue;
+            };
+
+            let sample = snapshot.identified_at(0, false).unwrap().metric;
+            accepted += 1;
+
+            if [
+                sample.disk_read_bytes,
+                sample.disk_write_bytes,
+                sample.net_rx_bytes,
+                sample.net_tx_bytes,
+            ]
+            .iter()
+            .any(|value| *value != sample.memory_bytes)
+            {
+                inconsistent = Some(sample);
+                break;
+            }
+        }
+
+        stop.store(true, Ordering::Release);
+        writing.join().unwrap();
+
+        assert!(
+            inconsistent.is_none(),
+            "accepted a torn sample: {inconsistent:?}"
+        );
+        assert!(accepted > 0, "no complete samples were observed");
+    }
+
     #[test]
     fn reserve_activate_write_and_snapshot_roundtrip() {
         let name = unique_name("rt");
@@ -3649,5 +4011,57 @@ mod tests {
         assert_eq!(stale.state, LiveMetricState::Stale);
         assert!(reg.active_snapshot().unwrap().is_empty());
         cleanup(&name);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_file_updates_in_place_and_rejects_symlinks_and_bad_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp_shm = unique_name("open-file-src");
+        let seed = MetricsRegistry::open_or_create(&tmp_shm, 1).unwrap();
+        let res = seed
+            .reserve(ReserveSlot {
+                sandbox_id: 7,
+                name: "priv",
+                memory_limit_bytes: 2048,
+            })
+            .unwrap();
+        let bytes =
+            std::fs::read(std::path::Path::new("/dev/shm").join(tmp_shm.trim_start_matches('/')))
+                .unwrap();
+        drop(seed);
+        cleanup(&tmp_shm);
+
+        let file_path = dir.path().join("priv");
+        std::fs::write(&file_path, &bytes).unwrap();
+
+        let reg = MetricsRegistry::open_file(&file_path).unwrap();
+        let writer = reg
+            .activate_writer(ActivateSlot {
+                slot: res.slot,
+                generation: res.generation,
+                run_id: 77,
+                pid: alive_pid(),
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        write_minimal_sample(&writer, 4096);
+        drop(writer);
+        drop(reg);
+
+        let snapshot = MetricsRegistry::read_file_snapshot(&File::open(&file_path).unwrap())
+            .unwrap()
+            .identified_snapshot(false);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].metric.run_id, 77);
+        assert_eq!(snapshot[0].metric.memory_bytes, 4096);
+
+        let link_path = dir.path().join("priv-link");
+        std::os::unix::fs::symlink(&file_path, &link_path).unwrap();
+        assert!(MetricsRegistry::open_file(&link_path).is_err());
+
+        let short_path = dir.path().join("short");
+        std::fs::write(&short_path, b"too short").unwrap();
+        assert!(MetricsRegistry::open_file(&short_path).is_err());
     }
 }

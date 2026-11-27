@@ -82,6 +82,10 @@ use std::path::PathBuf;
 use futures::Stream;
 
 #[cfg(feature = "local")]
+use crate::host_file::HostFilePolicy;
+#[cfg(feature = "local")]
+use logger::default_logger;
+#[cfg(feature = "local")]
 use stream::{LogEngine, LogFileConfig, LogFileFormat};
 
 #[cfg(feature = "local")]
@@ -146,10 +150,9 @@ pub struct LogSnapshot {
 /// Compute the on-disk log directory for a sandbox name.
 #[cfg(feature = "local")]
 pub fn log_dir_for(name: &str) -> PathBuf {
-    crate::context::default_local_context()
-        .as_local()
-        .map(|local| log_dir_for_local(local, name))
-        .unwrap_or_else(|| {
+    default_logger(name)
+        .map(|logger| logger.log_dir)
+        .unwrap_or_else(|_| {
             microsandbox_utils::resolve_home()
                 .join(microsandbox_utils::SANDBOXES_SUBDIR)
                 .join(name)
@@ -228,7 +231,9 @@ pub(crate) async fn read_logs_snapshot_local(
     name: &str,
     opts: &LogOptions,
 ) -> MicrosandboxResult<LogSnapshot> {
-    read_logs_snapshot_from_dir(name, log_dir_for_local(local, name), opts).await
+    SandboxLogger::for_local(local, name)
+        .read_snapshot(opts)
+        .await
 }
 
 /// Read all matching local log entries and return the snapshot end cursor.
@@ -238,7 +243,7 @@ pub(crate) async fn read_logs_snapshot_local(
 /// lines written between the snapshot drain and follow startup.
 #[cfg(feature = "local")]
 pub async fn read_logs_snapshot(name: &str, opts: &LogOptions) -> MicrosandboxResult<LogSnapshot> {
-    read_logs_snapshot_from_dir(name, log_dir_for(name), opts).await
+    default_logger(name)?.read_snapshot(opts).await
 }
 
 #[cfg(feature = "local")]
@@ -246,6 +251,7 @@ async fn read_logs_snapshot_from_dir(
     name: &str,
     log_dir: PathBuf,
     opts: &LogOptions,
+    host_file_policy: HostFilePolicy,
 ) -> MicrosandboxResult<LogSnapshot> {
     crate::sandbox::validate_sandbox_name(name)?;
     let stream_opts = LogStreamOptions {
@@ -267,6 +273,7 @@ async fn read_logs_snapshot_from_dir(
         &stream_opts.start,
         stream_opts.until,
         stream_opts.follow,
+        host_file_policy,
     )
     .await?;
     let (mut entries, cursor) = engine.drain_sorted_snapshot().await?;
@@ -286,7 +293,8 @@ pub async fn log_stream(
     name: &str,
     opts: &LogStreamOptions,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
-    log_stream_from_dir(name, log_dir_for(name), opts).await
+    let logger = default_logger(name)?;
+    log_stream_from_dir(name, logger.log_dir, opts, logger.host_file_policy).await
 }
 
 /// Stream log entries through an explicit local backend.
@@ -296,7 +304,8 @@ pub(crate) async fn log_stream_local(
     name: &str,
     opts: &LogStreamOptions,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
-    log_stream_from_dir(name, log_dir_for_local(local, name), opts).await
+    let logger = SandboxLogger::for_local(local, name);
+    log_stream_from_dir(name, logger.log_dir, opts, logger.host_file_policy).await
 }
 
 #[cfg(feature = "local")]
@@ -304,6 +313,7 @@ async fn log_stream_from_dir(
     name: &str,
     log_dir: PathBuf,
     opts: &LogStreamOptions,
+    host_file_policy: HostFilePolicy,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
     crate::sandbox::validate_sandbox_name(name)?;
     if !tokio::fs::try_exists(&log_dir).await.unwrap_or(false) {
@@ -317,6 +327,7 @@ async fn log_stream_from_dir(
         &opts.start,
         opts.until,
         opts.follow,
+        host_file_policy,
     )
     .await?;
     Ok(engine.into_stream())
@@ -332,6 +343,7 @@ pub(crate) async fn log_stream_from_dir_registry(
     log_dir: PathBuf,
     opts: &LogStreamOptions,
     subscription: watch::LogSubscription,
+    host_file_policy: HostFilePolicy,
 ) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
     crate::sandbox::validate_sandbox_name(name)?;
     if !tokio::fs::try_exists(&log_dir).await.unwrap_or(false) {
@@ -345,7 +357,15 @@ pub(crate) async fn log_stream_from_dir_registry(
         &opts.start,
         opts.until,
         subscription,
+        host_file_policy,
     )
     .await?;
     Ok(engine.into_stream())
 }
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, unix, feature = "local"))]
+mod tests;

@@ -20,6 +20,15 @@ pub(in crate::checkpoint) struct Guard {
     private_boundaries: Vec<PathBuf>,
 }
 
+/// Retains the configured path and its resolved destination while publishing
+/// host-owned files. Both guards must live until publication completes.
+#[cfg(any(windows, feature = "net", feature = "client"))]
+pub(in crate::checkpoint) struct ConfigurationHome {
+    pub(in crate::checkpoint) path: PathBuf,
+    _lexical: Guard,
+    _target: Guard,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -54,14 +63,71 @@ pub(super) fn acquire(
 
 /// A configured storage home may itself be an administrator-selected alias.
 /// Check its lexical ancestry and pin the canonical directory for publication.
-#[cfg(any(feature = "net", feature = "client"))]
-pub(in crate::checkpoint) fn configuration_home(
-    home: &Path,
-) -> Result<(PathBuf, Guard, Guard), String> {
+#[cfg(any(windows, feature = "net", feature = "client"))]
+pub(in crate::checkpoint) fn configuration_home(home: &Path) -> Result<ConfigurationHome, String> {
     let lexical = acquire_parents(vec![home.to_owned()], true, false)?;
     let path = fs::canonicalize(home).map_err(|e| failure(home, &e))?;
     let target = acquire_parents(vec![path.clone()], true, true)?;
-    Ok((path, lexical, target))
+    Ok(ConfigurationHome {
+        path,
+        _lexical: lexical,
+        _target: target,
+    })
+}
+
+/// Bind credentials to the actual home and catalog directories. Pin each
+/// component while descending so an intermediate junction cannot select some
+/// other home's credential store. Only the new profile path holds key material.
+#[cfg(windows)]
+pub(in crate::checkpoint) fn windows_catalog_scope(catalog: &Path) -> Result<String, String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, VOLUME_NAME_GUID};
+
+    let absolute = std::path::absolute(catalog).map_err(|e| failure(catalog, &e))?;
+    let mut chain = absolute.ancestors().collect::<Vec<_>>();
+    chain.reverse();
+    let pins = chain
+        .into_iter()
+        .map(|path| open_directory(path, true))
+        .collect::<Result<Vec<_>, _>>()?;
+    let [.., home, directory] = pins.as_slice() else {
+        return Err("TLS storage has no owning home directory".into());
+    };
+    // A network server supplies its own file IDs. Require a local volume
+    // GUID so a remote catalog cannot select a local user's credential store.
+    let mut name = [0u16; 32768];
+    let len = unsafe {
+        GetFinalPathNameByHandleW(
+            directory.as_raw_handle(),
+            name.as_mut_ptr(),
+            name.len() as u32,
+            VOLUME_NAME_GUID,
+        )
+    } as usize;
+    let path = name
+        .get(..len)
+        .and_then(|value| String::from_utf16(value).ok());
+    let guid = path
+        .as_deref()
+        .and_then(|value| value.strip_prefix(r"\\?\Volume{"))
+        .and_then(|value| value.split_once(r"}\"))
+        .map(|(guid, _)| guid)
+        .filter(|guid| guid.len() == 36 && guid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
+        .ok_or("shared TLS storage requires stable local Windows volume and folder identities")?;
+    let identity = |file| {
+        let (_, high, low) = super::super::memory_cache::windows_file_identity(file)
+            .map_err(|e| failure(catalog, &e))?;
+        if high == 0 && low == 0 {
+            return Err("shared TLS storage requires stable folder identities".to_owned());
+        }
+        Ok(format!("{high:08x}{low:08x}"))
+    };
+    Ok(format!(
+        "{}-{}-{}",
+        guid.to_ascii_lowercase(),
+        identity(home)?,
+        identity(directory)?
+    ))
 }
 
 pub(super) fn private_parent(path: &Path) -> Result<Guard, String> {
@@ -449,6 +515,59 @@ mod tests {
         drop(protected);
         fs::rename(&runtime, &renamed).unwrap();
         fs::rename(&renamed, &runtime).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_home_below_a_shared_directory_checks_each_selected_folder() {
+        use std::process::Command;
+
+        let (temporary, _, _) = fixture();
+        let dev = temporary.path().canonicalize().unwrap().join(".dev");
+        let tools = dev.join("tools");
+        let home = tools.join("msb");
+        fs::create_dir_all(&home).unwrap();
+        let grant = |path: &Path, rights: &str| {
+            let output = Command::new("icacls.exe")
+                .arg(path)
+                .arg("/grant:r")
+                .arg(format!("*S-1-5-11:{rights}"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        // Other accounts may create siblings of our existing tools directory.
+        grant(&dev, "(WD,AD)");
+        for execution in [false, true] {
+            acquire_parents(vec![home.clone()], execution, true).unwrap();
+        }
+
+        // Inherit-only writes on the publication parent can affect newly created files.
+        grant(&home, "(OI)(CI)(IO)(M)");
+        let error = acquire_parents(vec![home.clone()], true, true)
+            .err()
+            .unwrap();
+        assert!(
+            error.contains(&format!("namespace {} ", home.display())),
+            "{error}"
+        );
+        grant(&home, "(RX)");
+
+        // A private home cannot protect an intermediate directory that others can rename.
+        grant(&tools, "(M)");
+        for execution in [false, true] {
+            let error = acquire_parents(vec![home.clone()], execution, true)
+                .err()
+                .unwrap();
+            assert!(
+                error.contains(&format!("namespace {} ", tools.display())),
+                "{error}"
+            );
+        }
     }
 
     #[cfg(windows)]

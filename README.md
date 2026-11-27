@@ -31,6 +31,18 @@
 
 <br />
 
+<div align="center">
+  <a href="https://microsandbox.dev">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./assets/microsandbox-cloud-banner-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="./assets/microsandbox-cloud-banner-light.png">
+      <img width="100%" src="./assets/microsandbox-cloud-banner-dark.png" alt="we are launching microsandbox cloud. learn more.">
+    </picture>
+  </a>
+</div>
+
+<br />
+
 **Microsandbox** runs **untrusted workloads** inside fast, local microVMs: AI agents, user code, plugins, CI jobs, dev environments, scrapers, and automation.
 
 ##
@@ -152,7 +164,7 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 > ```sh
 > # Snapshot now, resume later.
 > msb snap create --sandbox app --full -o snapshot.msb
-> msb snap restore snapshot.msb --name app3
+> msb create --from-snapshot ./snapshot.msb --name app3
 > ```
 >
 > ```sh
@@ -213,8 +225,8 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 >
 > Run:<br />
 > · `msb --help` for quick help menu. <br />
-> · `msb --tree` for complete command hierarchy and descriptions. <br />
-> · `msb <command> --tree` for a specific command tree.
+> · `msb --tree` for the complete command hierarchy and descriptions. <br />
+> · `msb --tree -CL 2` for a compact two-level view.
 
 <br />
 

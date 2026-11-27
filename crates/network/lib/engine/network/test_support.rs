@@ -61,7 +61,7 @@ impl TxToken for GuestTx<'_> {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(super) fn ipv6_loopback_unavailable(error: &std::io::Error) -> bool {
+pub(in crate::engine) fn ipv6_loopback_unavailable(error: &std::io::Error) -> bool {
     match error.raw_os_error() {
         #[cfg(unix)]
         Some(libc::EAFNOSUPPORT | libc::EPROTONOSUPPORT) => true,

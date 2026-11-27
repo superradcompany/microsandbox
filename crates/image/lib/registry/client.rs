@@ -30,8 +30,8 @@ use tokio::{
 
 use crate::{
     cache::{
-        self, CachedImageMetadata, CachedLayerMetadata, GlobalCache, VmdkWriteMode,
-        lock::CacheLockGuard,
+        self, CacheAuthProvenance, CachedImageMetadata, CachedLayerMetadata, GlobalCache,
+        VmdkWriteMode, lock::CacheLockGuard,
     },
     config::ImageConfig,
     digest::Digest,
@@ -188,39 +188,71 @@ impl Registry {
 
     /// Resolve a pull from any complete cached image metadata matching a manifest digest.
     ///
-    /// Snapshot restores use this before contacting a registry because the
-    /// snapshot already records the immutable base image digest, while cached
-    /// metadata may still be keyed by the mutable tag that produced it.
+    /// Only entries whose provenance permits unauthenticated cache hits are returned.
     /// Pass a retained [`GlobalCache::operation`] scope to protect the matched artifacts
     /// through publication; the returned values do not hold leases.
     pub async fn pull_cached_by_manifest_digest(
         cache: &GlobalCache,
         manifest_digest: &Digest,
     ) -> ImageResult<Option<(PullResult, CachedImageMetadata)>> {
-        Ok(
-            resolve_cached_pull_result_by_manifest_digest_async(cache, manifest_digest, false)
-                .await?
-                .map(|cached| (cached.result, cached.metadata)),
+        Ok(resolve_cached_pull_result_by_manifest_digest_async(
+            cache,
+            manifest_digest,
+            false,
+            false,
         )
+        .await?
+        .map(|cached| (cached.result, cached.metadata)))
     }
 
     /// Resolve snapshot image defaults by immutable digest. Flat snapshots own
     /// their complete disk, so they need metadata but no materialized OCI layers.
+    ///
+    /// Only entries whose provenance permits unauthenticated cache hits are returned.
     pub async fn pull_snapshot_cached(
         cache: &GlobalCache,
         references: &[oci_client::Reference],
         manifest_digest: &Digest,
         materialization: RootfsMaterialization,
     ) -> ImageResult<Option<(PullResult, CachedImageMetadata)>> {
+        Self::pull_snapshot_cached_inner(cache, references, manifest_digest, materialization, false)
+            .await
+    }
+
+    /// Resolve snapshot image defaults by immutable digest, permitting entries with
+    /// restricted (`authenticated` / `unknown`) provenance.
+    ///
+    /// Callers must use this only when the caller owns the cached entry — specifically
+    /// after unpacking a caller-supplied `--with-image` archive or during offline
+    /// restore inside an isolated per-tenant cache directory.
+    pub async fn pull_snapshot_cached_allow_restricted(
+        cache: &GlobalCache,
+        references: &[oci_client::Reference],
+        manifest_digest: &Digest,
+        materialization: RootfsMaterialization,
+    ) -> ImageResult<Option<(PullResult, CachedImageMetadata)>> {
+        Self::pull_snapshot_cached_inner(cache, references, manifest_digest, materialization, true)
+            .await
+    }
+
+    async fn pull_snapshot_cached_inner(
+        cache: &GlobalCache,
+        references: &[oci_client::Reference],
+        manifest_digest: &Digest,
+        materialization: RootfsMaterialization,
+        allow_restricted_provenance: bool,
+    ) -> ImageResult<Option<(PullResult, CachedImageMetadata)>> {
         let metadata_only = materialization == RootfsMaterialization::Flat;
         let expected = manifest_digest.to_string();
         // Most snapshots retain either their original tag key or a pinned key.
         // Avoid scanning every unrelated image on this common path.
         for reference in references {
-            if let Some(metadata) = cache.read_image_metadata_async(reference).await?
-                && metadata.manifest_digest == expected
+            if let Some(metadata) = cache.read_image_entry_async(reference).await?
+                && metadata.metadata.manifest_digest == expected
+                && (allow_restricted_provenance
+                    || metadata.pull_auth.allows_unauthenticated_cache_hit())
                 && let Some(cached) =
-                    resolve_snapshot_metadata(cache, metadata, metadata_only).await?
+                    resolve_snapshot_metadata(cache, metadata.metadata, metadata_only).await?
             {
                 return Ok(Some((cached.result, cached.metadata)));
             }
@@ -229,6 +261,7 @@ impl Registry {
             cache,
             manifest_digest,
             metadata_only,
+            allow_restricted_provenance,
         )
         .await?
         .map(|cached| (cached.result, cached.metadata)))
@@ -240,6 +273,15 @@ impl Registry {
         &self,
         reference: &oci_client::Reference,
     ) -> ImageResult<PullResult> {
+        let (result, _) = self.pull_snapshot_metadata_with_metadata(reference).await?;
+        Ok(result)
+    }
+
+    /// Fetch pinned snapshot defaults and return the exact metadata published.
+    pub async fn pull_snapshot_metadata_with_metadata(
+        &self,
+        reference: &oci_client::Reference,
+    ) -> ImageResult<(PullResult, CachedImageMetadata)> {
         let expected = reference.digest().ok_or_else(|| {
             ImageError::ManifestParse("snapshot metadata requires a digest-pinned reference".into())
         })?;
@@ -279,10 +321,14 @@ impl Registry {
         };
         let mut result = cached_pull_result(&metadata)?;
         self.cache
-            .write_image_metadata_async(reference, &metadata)
+            .write_image_metadata_with_provenance_async(
+                reference,
+                &metadata,
+                pull_auth_provenance(&self.auth),
+            )
             .await?;
         result.cached = false;
-        Ok(result)
+        Ok((result, metadata))
     }
 
     /// Pull an image. Downloads blobs and materializes EROFS layers concurrently.
@@ -294,7 +340,20 @@ impl Registry {
         reference: &oci_client::Reference,
         options: &PullOptions,
     ) -> ImageResult<PullResult> {
-        self.pull_inner(reference, options, None).await
+        let (result, _) = self.pull_with_metadata(reference, options, None).await?;
+        Ok(result)
+    }
+
+    /// Resolve an image together with the exact metadata admitted by this pull.
+    ///
+    /// Retain a caller-owned cache operation until durable ownership is recorded.
+    pub async fn pull_with_metadata(
+        &self,
+        reference: &oci_client::Reference,
+        options: &PullOptions,
+        progress: Option<PullProgressSender>,
+    ) -> ImageResult<(PullResult, CachedImageMetadata)> {
+        self.pull_inner(reference, options, progress).await
     }
 
     /// Materialize layers that have already been staged into the cache.
@@ -308,8 +367,15 @@ impl Registry {
         metadata: &CachedImageMetadata,
         force: bool,
     ) -> ImageResult<PullResult> {
-        self.materialize_cached_layers_inner(reference, metadata, force, None, None)
-            .await
+        self.materialize_cached_rootfs(
+            reference,
+            metadata,
+            force,
+            RootfsMaterialization::Layered,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Materialize a reusable flat ext4 rootfs from already cached EROFS layers.
@@ -375,29 +441,12 @@ impl Registry {
         .map_err(|error| ImageError::Io(io::Error::other(error)))?
     }
 
-    pub(crate) async fn materialize_cached_layers_from_paths(
+    pub(crate) async fn materialize_cached_rootfs(
         &self,
         reference: &oci_client::Reference,
         metadata: &CachedImageMetadata,
         force: bool,
-        staged_layers: Arc<crate::archive::StagedLayerGuard>,
-        progress: Option<PullProgressSender>,
-    ) -> ImageResult<PullResult> {
-        self.materialize_cached_layers_inner(
-            reference,
-            metadata,
-            force,
-            Some(staged_layers),
-            progress,
-        )
-        .await
-    }
-
-    async fn materialize_cached_layers_inner(
-        &self,
-        reference: &oci_client::Reference,
-        metadata: &CachedImageMetadata,
-        force: bool,
+        materialization: RootfsMaterialization,
         staged_layers: Option<Arc<crate::archive::StagedLayerGuard>>,
         progress: Option<PullProgressSender>,
     ) -> ImageResult<PullResult> {
@@ -425,7 +474,7 @@ impl Registry {
             layer_descriptors: &layer_descriptors,
             diff_ids: &diff_ids,
             force,
-            materialization: RootfsMaterialization::Layered,
+            materialization,
             progress,
             staged_layers,
         })
@@ -435,6 +484,11 @@ impl Registry {
             .iter()
             .map(|diff_id| diff_id.parse())
             .collect::<ImageResult<Vec<Digest>>>()?;
+
+        if materialization.includes_flat() {
+            self.materialize_flat_rootfs(&manifest_digest, &layer_diff_ids, force)
+                .await?;
+        }
 
         Ok(PullResult {
             layer_diff_ids,
@@ -507,9 +561,10 @@ impl Registry {
                 platform,
                 cache,
             };
-            registry
+            let (result, _) = registry
                 .pull_inner(&reference, &options, Some(sender))
-                .await
+                .await?;
+            Ok(result)
         })
     }
 
@@ -519,7 +574,7 @@ impl Registry {
         reference: &oci_client::Reference,
         options: &PullOptions,
         progress: Option<PullProgressSender>,
-    ) -> ImageResult<PullResult> {
+    ) -> ImageResult<(PullResult, CachedImageMetadata)> {
         let scoped = Self {
             client: self.client.clone(),
             auth: self.auth.clone(),
@@ -534,7 +589,7 @@ impl Registry {
         reference: &oci_client::Reference,
         options: &PullOptions,
         progress: Option<PullProgressSender>,
-    ) -> ImageResult<PullResult> {
+    ) -> ImageResult<(PullResult, CachedImageMetadata)> {
         let _reference_lease = self
             .cache
             .lease_paths_async(vec![self.cache.image_metadata_path(reference)])
@@ -549,9 +604,14 @@ impl Registry {
         let _image_lock_guard = image_lock_guard;
 
         // Step 1: Early cache check using persisted image metadata.
-        if let Some(cached) =
-            resolve_cached_pull_result_async(&self.cache, reference, options, &self.platform)
-                .await?
+        if let Some(cached) = resolve_cached_pull_result_async(
+            &self.cache,
+            reference,
+            options,
+            &self.platform,
+            &self.auth,
+        )
+        .await?
         {
             tracing::debug!(
                 reference = %reference,
@@ -580,7 +640,7 @@ impl Registry {
                 });
             }
 
-            return Ok(cached.result);
+            return Ok((cached.result, cached.metadata));
         }
 
         if options.pull_policy == PullPolicy::Never {
@@ -597,6 +657,11 @@ impl Registry {
         }
 
         let resolve_started_at = Instant::now();
+        // oci-client verifies the requested manifest/index bytes against the pin
+        // and verifies the selected platform manifest against its index entry.
+        // Its returned digest identifies that platform manifest, so comparing it
+        // with an index pin would reject a valid pull. Retain the platform digest
+        // for materialization and cache identity.
         let (manifest_bytes, manifest_digest, config_bytes) =
             self.fetch_manifest_and_config(oci_ref).await?;
 
@@ -715,7 +780,11 @@ impl Registry {
                 .collect(),
         };
         self.cache
-            .write_image_metadata_async(reference, &cached_image)
+            .write_image_metadata_with_provenance_async(
+                reference,
+                &cached_image,
+                pull_auth_provenance(&self.auth),
+            )
             .await?;
 
         tracing::debug!(
@@ -732,12 +801,13 @@ impl Registry {
             });
         }
 
-        Ok(PullResult {
+        let result = PullResult {
             layer_diff_ids,
             config: image_config,
             manifest_digest,
             cached: false,
-        })
+        };
+        Ok((result, cached_image))
     }
 
     /// Fetch manifest and config from the registry.
@@ -951,11 +1021,17 @@ impl Registry {
         let all_layers_valid =
             all_layers_materialized_async(&self.cache, &validated_diff_ids).await;
 
-        if all_layers_valid
-            && (!materialization.includes_layered() || (fsmeta_valid && vmdk_valid))
-            && !force
-        {
-            return Ok(());
+        if all_layers_valid && !force {
+            if let Some(staged) = &staged_layers {
+                for (layer, diff_id) in layer_descriptors.iter().zip(&validated_diff_ids) {
+                    if let Some(path) = staged.get(&layer.digest.to_string()) {
+                        verify_staged_layer(path, layer.media_type.as_deref(), diff_id).await?;
+                    }
+                }
+            }
+            if !materialization.includes_layered() || (fsmeta_valid && vmdk_valid) {
+                return Ok(());
+            }
         }
 
         if materialization.includes_layered()
@@ -1015,6 +1091,11 @@ impl Registry {
                     let layer_started_at = Instant::now();
 
                     if cache::is_valid_erofs_artifact_async(&erofs_path).await && !layer_force {
+                        if !all_layers_valid && let Some(path) = &staged_tar_path {
+                            verify_staged_layer(path, media_type.as_deref(), &diff_id_digest)
+                                .await
+                                .map_err(|error| LayerPipelineFailure { error })?;
+                        }
                         if let Some(ref p) = progress {
                             p.send(PullProgress::LayerMaterializeComplete {
                                 layer_index: i,
@@ -1059,6 +1140,11 @@ impl Registry {
 
                     // Re-check after lock — another process may have materialized it.
                     if cache::is_valid_erofs_artifact_async(&erofs_path).await && !layer_force {
+                        if !all_layers_valid && let Some(path) = &staged_tar_path {
+                            verify_staged_layer(path, media_type.as_deref(), &diff_id_digest)
+                                .await
+                                .map_err(|error| LayerPipelineFailure { error })?;
+                        }
                         if let Some(ref p) = progress {
                             p.send(PullProgress::LayerMaterializeComplete {
                                 layer_index: i,
@@ -1487,6 +1573,31 @@ pub(super) fn resolve_platform_digest(
 }
 
 /// Build a pull result from cached image metadata.
+async fn verify_staged_layer(
+    path: &Path,
+    media_type: Option<&str>,
+    diff_id: &Digest,
+) -> ImageResult<()> {
+    let file = tokio::fs::File::open(path).await?;
+    let compression = Compression::from_media_type(media_type.unwrap_or_default());
+    let actual =
+        tar::hash_compressed_tar(file, compression, ResourceLimits::default().max_total_size)
+            .await
+            .map_err(|error| ImageError::Materialize {
+                digest: diff_id.to_string(),
+                message: format!("archive layer verification failed: {error}"),
+                source: None,
+            })?;
+    if actual != diff_id.hex() {
+        return Err(ImageError::DigestMismatch {
+            digest: diff_id.to_string(),
+            expected: diff_id.to_string(),
+            actual: format!("sha256:{actual}"),
+        });
+    }
+    Ok(())
+}
+
 fn cached_pull_result(metadata: &CachedImageMetadata) -> ImageResult<PullResult> {
     let manifest_digest: Digest = metadata.manifest_digest.parse()?;
     let layer_diff_ids = metadata
@@ -1667,9 +1778,13 @@ fn resolve_cached_pull_result_for_platform(
         return Ok(None);
     }
 
-    let Some(metadata) = cache.read_image_metadata(reference)? else {
+    let Some(metadata) = cache.read_image_entry(reference)? else {
         return Ok(None);
     };
+    if !metadata.pull_auth.allows_unauthenticated_cache_hit() {
+        return Ok(None);
+    }
+    let metadata = metadata.metadata;
 
     let _leases = match cache.metadata_paths(&metadata) {
         Ok(paths) => cache.lease_paths(paths)?,
@@ -1752,14 +1867,19 @@ async fn resolve_cached_pull_result_async(
     reference: &oci_client::Reference,
     options: &PullOptions,
     platform: &Platform,
+    auth: &oci_client::secrets::RegistryAuth,
 ) -> ImageResult<Option<CachedPullInfo>> {
-    if options.force || options.pull_policy == PullPolicy::Always {
+    if is_authenticated(auth) || options.force || options.pull_policy == PullPolicy::Always {
         return Ok(None);
     }
 
-    let Some(metadata) = cache.read_image_metadata_async(reference).await? else {
+    let Some(metadata) = cache.read_image_entry_async(reference).await? else {
         return Ok(None);
     };
+    if !metadata.pull_auth.allows_unauthenticated_cache_hit() {
+        return Ok(None);
+    }
+    let metadata = metadata.metadata;
 
     resolve_cached_metadata_pull_result_async(cache, metadata, options.materialization, platform)
         .await
@@ -1769,6 +1889,7 @@ async fn resolve_cached_pull_result_by_manifest_digest_async(
     cache: &GlobalCache,
     manifest_digest: &Digest,
     metadata_only: bool,
+    allow_restricted_provenance: bool,
 ) -> ImageResult<Option<CachedPullInfo>> {
     let expected = manifest_digest.to_string();
     let mut entries = tokio::fs::read_dir(cache.manifests_dir())
@@ -1793,8 +1914,13 @@ async fn resolve_cached_pull_result_by_manifest_digest_async(
         else {
             continue;
         };
+        if !allow_restricted_provenance && !metadata.pull_auth.allows_unauthenticated_cache_hit() {
+            continue;
+        }
 
-        if let Some(cached) = resolve_snapshot_metadata(cache, metadata, metadata_only).await? {
+        if let Some(cached) =
+            resolve_snapshot_metadata(cache, metadata.metadata, metadata_only).await?
+        {
             return Ok(Some(cached));
         }
     }
@@ -1896,6 +2022,18 @@ fn layer_work_path(tmp_dir: &Path, diff_id: &Digest, suffix: &str) -> PathBuf {
     tmp_dir.join(format!("{}.{}", diff_id.to_path_safe(), suffix))
 }
 
+fn is_authenticated(auth: &oci_client::secrets::RegistryAuth) -> bool {
+    !matches!(auth, oci_client::secrets::RegistryAuth::Anonymous)
+}
+
+fn pull_auth_provenance(auth: &oci_client::secrets::RegistryAuth) -> CacheAuthProvenance {
+    if is_authenticated(auth) {
+        CacheAuthProvenance::Authenticated
+    } else {
+        CacheAuthProvenance::Anonymous
+    }
+}
+
 fn json_bytes_to_string(bytes: &[u8], context: &str) -> ImageResult<String> {
     std::str::from_utf8(bytes)
         .map(str::to_owned)
@@ -1918,7 +2056,7 @@ mod tests {
         resolve_cached_pull_result, resolve_platform_digest,
     };
     use crate::{
-        cache::{CachedImageMetadata, CachedLayerMetadata, GlobalCache},
+        cache::{CacheAuthProvenance, CachedImageMetadata, CachedLayerMetadata, GlobalCache},
         config::ImageConfig,
         digest::Digest,
         erofs,
@@ -2838,5 +2976,835 @@ mod tests {
         let cache = GlobalCache::new(temp.path()).unwrap();
         // Registry::new() should succeed just like builder().build()
         super::Registry::new(Platform::default(), cache).unwrap();
+    }
+
+    #[derive(Default)]
+    struct MockManifestOptions {
+        index_media_type: Option<&'static str>,
+        corrupt_index: bool,
+        corrupt_manifest: bool,
+    }
+
+    struct MockOciRegistry {
+        addr: std::net::SocketAddr,
+        index_digest: String,
+        manifest_digest: String,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        manifest_requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        layer_blob_requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl MockOciRegistry {
+        fn start(required_auth_header: Option<&str>) -> Self {
+            Self::start_with_manifests(required_auth_header, MockManifestOptions::default())
+        }
+
+        fn start_with_manifests(
+            required_auth_header: Option<&str>,
+            options: MockManifestOptions,
+        ) -> Self {
+            use std::io::{Read, Write};
+            use std::net::TcpListener;
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+            use sha2::{Digest as Sha2Digest, Sha256};
+
+            let mut tar_bytes = Vec::new();
+            {
+                let mut builder = tar::Builder::new(&mut tar_bytes);
+                let data = b"hello from private layer\n";
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, "etc/greeting.txt", &data[..])
+                    .unwrap();
+                builder.finish().unwrap();
+            }
+
+            let layer_digest = format!("sha256:{}", hex::encode(Sha256::digest(&tar_bytes)));
+            let config_bytes = serde_json::to_vec(&serde_json::json!({
+                "architecture": Platform::host_linux().arch.to_string(),
+                "os": "linux",
+                "config": {
+                    "Env": ["PATH=/usr/bin"]
+                },
+                "rootfs": {
+                    "type": "layers",
+                    "diff_ids": [layer_digest]
+                }
+            }))
+            .unwrap();
+            let config_digest = format!("sha256:{}", hex::encode(Sha256::digest(&config_bytes)));
+            let mut manifest_bytes = serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {
+                    "mediaType": "application/vnd.oci.image.config.v1+json",
+                    "digest": config_digest,
+                    "size": config_bytes.len()
+                },
+                "layers": [{
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "digest": layer_digest,
+                    "size": tar_bytes.len()
+                }]
+            }))
+            .unwrap();
+            let manifest_digest =
+                format!("sha256:{}", hex::encode(Sha256::digest(&manifest_bytes)));
+            let index_media_type = options
+                .index_media_type
+                .unwrap_or("application/vnd.oci.image.index.v1+json");
+            let mut index_bytes = serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "mediaType": index_media_type,
+                "manifests": [{
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": format!("sha256:{}", "f".repeat(64)),
+                    "size": manifest_bytes.len(),
+                    "platform": {
+                        "architecture": if Platform::host_linux().arch.to_string() == "arm64" {
+                            "amd64"
+                        } else {
+                            "arm64"
+                        },
+                        "os": "linux"
+                    }
+                }, {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": manifest_digest,
+                    "size": manifest_bytes.len(),
+                    "platform": {
+                        "architecture": Platform::host_linux().arch.to_string(),
+                        "os": "linux"
+                    }
+                }]
+            }))
+            .unwrap();
+            let index_digest = format!("sha256:{}", hex::encode(Sha256::digest(&index_bytes)));
+
+            // Keep JSON valid and the advertised hashes unchanged. This proves
+            // rejection is caused by byte verification, not a parsing failure.
+            if options.corrupt_index {
+                index_bytes.push(b' ');
+            }
+            if options.corrupt_manifest {
+                manifest_bytes.push(b' ');
+            }
+
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let manifest_requests = Arc::new(AtomicUsize::new(0));
+            let layer_blob_requests = Arc::new(AtomicUsize::new(0));
+
+            let thread_stop = Arc::clone(&stop);
+            let thread_manifest_requests = Arc::clone(&manifest_requests);
+            let thread_layer_blob_requests = Arc::clone(&layer_blob_requests);
+            let required_auth = required_auth_header.map(str::to_owned);
+            let server_index_digest = index_digest.clone();
+            let server_manifest_digest = manifest_digest.clone();
+
+            let handle = std::thread::spawn(move || {
+                while !thread_stop.load(Ordering::SeqCst) {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        break;
+                    };
+                    if thread_stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") && request.len() < 32 * 1024
+                    {
+                        let Ok(n) = stream.read(&mut buf) else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buf[..n]);
+                    }
+                    let req_text = String::from_utf8_lossy(&request);
+                    let mut lines = req_text.lines();
+                    let request_line = lines.next().unwrap_or_default();
+                    let mut parts = request_line.split_whitespace();
+                    let _method = parts.next().unwrap_or_default();
+                    let path = parts.next().unwrap_or_default();
+
+                    let auth_header = lines.find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("authorization")
+                            .then(|| value.trim().to_owned())
+                    });
+
+                    if let Some(expected_auth) = &required_auth
+                        && auth_header.as_deref() != Some(expected_auth.as_str())
+                    {
+                        let body = br#"{"errors":[{"code":"UNAUTHORIZED","message":"authentication required"}]}"#;
+                        let header = format!(
+                            "HTTP/1.1 401 Unauthorized\r\n\
+                             WWW-Authenticate: Basic realm=\"test-registry\"\r\n\
+                             Content-Type: application/json\r\n\
+                             Content-Length: {}\r\n\
+                             Connection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(body);
+                        continue;
+                    }
+
+                    if path == "/v2/" {
+                        let header = "HTTP/1.1 200 OK\r\n\
+                                      Docker-Distribution-Api-Version: registry/2.0\r\n\
+                                      Content-Length: 2\r\n\
+                                      Connection: close\r\n\r\n{}";
+                        let _ = stream.write_all(header.as_bytes());
+                    } else if path.contains("/manifests/") {
+                        thread_manifest_requests.fetch_add(1, Ordering::SeqCst);
+                        // Resolve the child by digest; tag and other digest requests
+                        // receive the index so incorrect pins exercise verification.
+                        let (bytes, digest, media_type) = if options.index_media_type.is_some()
+                            && !path.ends_with(&format!("/manifests/{server_manifest_digest}"))
+                        {
+                            (&index_bytes, &server_index_digest, index_media_type)
+                        } else {
+                            (
+                                &manifest_bytes,
+                                &server_manifest_digest,
+                                "application/vnd.oci.image.manifest.v1+json",
+                            )
+                        };
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\n\
+                             Content-Type: {media_type}\r\n\
+                             Docker-Content-Digest: {digest}\r\n\
+                             Content-Length: {}\r\n\
+                             Connection: close\r\n\r\n",
+                            bytes.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(bytes);
+                    } else if path.ends_with(&format!("/blobs/{config_digest}")) {
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\n\
+                             Content-Type: application/vnd.oci.image.config.v1+json\r\n\
+                             Content-Length: {}\r\n\
+                             Connection: close\r\n\r\n",
+                            config_bytes.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(&config_bytes);
+                    } else if path.ends_with(&format!("/blobs/{layer_digest}")) {
+                        thread_layer_blob_requests.fetch_add(1, Ordering::SeqCst);
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\n\
+                             Content-Type: application/vnd.oci.image.layer.v1.tar\r\n\
+                             Content-Length: {}\r\n\
+                             Connection: close\r\n\r\n",
+                            tar_bytes.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(&tar_bytes);
+                    } else {
+                        let header = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        let _ = stream.write_all(header.as_bytes());
+                    }
+                }
+            });
+
+            Self {
+                addr,
+                index_digest,
+                manifest_digest,
+                stop,
+                manifest_requests,
+                layer_blob_requests,
+                handle: Some(handle),
+            }
+        }
+
+        fn host(&self) -> String {
+            self.addr.to_string()
+        }
+
+        fn reference(&self, repo_and_tag: &str) -> oci_client::Reference {
+            format!("{}/{repo_and_tag}", self.addr).parse().unwrap()
+        }
+
+        fn manifest_requests(&self) -> usize {
+            self.manifest_requests
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn layer_blob_requests(&self) -> usize {
+            self.layer_blob_requests
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn stop(mut self) {
+            self.shutdown();
+        }
+
+        fn shutdown(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::net::TcpStream::connect(self.addr);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    impl Drop for MockOciRegistry {
+        fn drop(&mut self) {
+            self.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pull_pinned_index_retains_platform_digest_and_warm_cache() {
+        for media_type in [
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        ] {
+            let server = MockOciRegistry::start_with_manifests(
+                None,
+                MockManifestOptions {
+                    index_media_type: Some(media_type),
+                    ..Default::default()
+                },
+            );
+            let reference = server.reference(&format!("library/public@{}", server.index_digest));
+            let temp = tempdir().unwrap();
+            let cache = GlobalCache::new(temp.path()).unwrap();
+            let registry = super::Registry::builder(Platform::host_linux(), cache.clone())
+                .add_insecure_registries(vec![server.host()])
+                .build()
+                .unwrap();
+            let options = PullOptions::default();
+
+            let cold = registry.pull(&reference, &options).await.unwrap();
+            assert!(!cold.cached);
+            assert_ne!(server.index_digest, server.manifest_digest);
+            assert_eq!(cold.manifest_digest.to_string(), server.manifest_digest);
+            assert_eq!(server.manifest_requests(), 2);
+            assert_eq!(server.layer_blob_requests(), 1);
+            let metadata = cache.read_image_entry(&reference).unwrap().unwrap();
+            assert_eq!(metadata.metadata.manifest_digest, server.manifest_digest);
+            assert_eq!(metadata.pull_auth, CacheAuthProvenance::Anonymous);
+
+            // Cache identity remains the selected image, even though the caller
+            // pinned its parent index. A warm pull must work without a registry.
+            server.stop();
+            let warm = registry.pull(&reference, &options).await.unwrap();
+            assert!(warm.cached);
+            assert_eq!(warm.manifest_digest, cold.manifest_digest);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pull_pinned_image_manifest() {
+        let server = MockOciRegistry::start(None);
+        let reference = server.reference(&format!("library/public@{}", server.manifest_digest));
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let registry = super::Registry::builder(Platform::host_linux(), cache)
+            .add_insecure_registries(vec![server.host()])
+            .build()
+            .unwrap();
+
+        let result = registry
+            .pull(&reference, &PullOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(result.manifest_digest.to_string(), server.manifest_digest);
+        assert_eq!(server.manifest_requests(), 1);
+        assert_eq!(server.layer_blob_requests(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pull_rejects_incorrect_index_pin_before_layers() {
+        let server = MockOciRegistry::start_with_manifests(
+            None,
+            MockManifestOptions {
+                index_media_type: Some("application/vnd.oci.image.index.v1+json"),
+                ..Default::default()
+            },
+        );
+        // The registry sends a self-consistent body and digest header, but they
+        // do not match the caller's pin. The header must not override that pin.
+        let reference = server.reference(&format!("library/public@sha256:{}", "0".repeat(64)));
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let registry = super::Registry::builder(Platform::host_linux(), cache.clone())
+            .add_insecure_registries(vec![server.host()])
+            .build()
+            .unwrap();
+
+        let error = registry
+            .pull(&reference, &PullOptions::default())
+            .await
+            .err()
+            .expect("invalid manifest digest must be rejected");
+        assert!(
+            matches!(
+                error,
+                ImageError::Registry(oci_client::errors::OciDistributionError::DigestError(
+                    oci_client::errors::DigestError::VerificationError { .. }
+                ))
+            ),
+            "{error:?}"
+        );
+        assert_eq!(server.manifest_requests(), 1);
+        assert_eq!(server.layer_blob_requests(), 0);
+        assert!(cache.read_image_entry(&reference).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pull_rejects_corrupt_pinned_manifests_before_layers() {
+        for (label, options, expected_requests) in [
+            (
+                "index",
+                MockManifestOptions {
+                    index_media_type: Some("application/vnd.oci.image.index.v1+json"),
+                    corrupt_index: true,
+                    ..Default::default()
+                },
+                1,
+            ),
+            (
+                "indexed image",
+                MockManifestOptions {
+                    index_media_type: Some("application/vnd.oci.image.index.v1+json"),
+                    corrupt_manifest: true,
+                    ..Default::default()
+                },
+                2,
+            ),
+            (
+                "direct image",
+                MockManifestOptions {
+                    corrupt_manifest: true,
+                    ..Default::default()
+                },
+                1,
+            ),
+        ] {
+            let has_index = options.index_media_type.is_some();
+            let server = MockOciRegistry::start_with_manifests(None, options);
+            let pin = if has_index {
+                &server.index_digest
+            } else {
+                &server.manifest_digest
+            };
+            let reference = server.reference(&format!("library/public@{pin}"));
+            let temp = tempdir().unwrap();
+            let cache = GlobalCache::new(temp.path()).unwrap();
+            let registry = super::Registry::builder(Platform::host_linux(), cache.clone())
+                .add_insecure_registries(vec![server.host()])
+                .build()
+                .unwrap();
+
+            let error = registry
+                .pull(&reference, &PullOptions::default())
+                .await
+                .err()
+                .expect("invalid manifest digest must be rejected");
+            assert!(
+                matches!(
+                    error,
+                    ImageError::Registry(oci_client::errors::OciDistributionError::DigestError(
+                        oci_client::errors::DigestError::VerificationError { .. }
+                    ))
+                ),
+                "{label}: {error:?}"
+            );
+            assert_eq!(server.manifest_requests(), expected_requests, "{label}");
+            assert_eq!(server.layer_blob_requests(), 0, "{label}");
+            assert!(
+                cache.read_image_entry(&reference).unwrap().is_none(),
+                "{label}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pull_cached_rejects_authenticated_metadata() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let reference: oci_client::Reference = "ghcr.io/acme/secret:v1".parse().unwrap();
+
+        let metadata = write_cached_image_fixture(&cache, &reference, &[true]);
+        cache
+            .write_image_metadata_with_provenance_async(
+                &reference,
+                &metadata,
+                CacheAuthProvenance::Authenticated,
+            )
+            .await
+            .unwrap();
+
+        let if_missing = PullOptions {
+            pull_policy: PullPolicy::IfMissing,
+            ..Default::default()
+        };
+        assert!(
+            super::Registry::pull_cached(&cache, &reference, &if_missing)
+                .unwrap()
+                .is_none(),
+            "authenticated cache entry must not be served by pull_cached"
+        );
+        assert!(
+            super::Registry::pull_cached_async(&cache, &reference, &if_missing)
+                .await
+                .unwrap()
+                .is_none(),
+            "authenticated cache entry must not be served by pull_cached_async"
+        );
+
+        let never = PullOptions {
+            pull_policy: PullPolicy::Never,
+            ..Default::default()
+        };
+        let anon_registry = super::Registry::new(Platform::host_linux(), cache.clone()).unwrap();
+        assert!(matches!(
+            anon_registry.pull(&reference, &never).await,
+            Err(ImageError::NotCached { .. })
+        ));
+
+        let other_auth_registry = super::Registry::builder(Platform::host_linux(), cache)
+            .auth(crate::RegistryAuth::Basic {
+                username: "tenant-b".into(),
+                password: "wrong".into(),
+            })
+            .build()
+            .unwrap();
+        assert!(matches!(
+            other_auth_registry.pull(&reference, &never).await,
+            Err(ImageError::NotCached { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_authenticated_pull_blocks_anonymous_and_wrong_tenant_reuse() {
+        // "tenant-a:secret-a" base64-encoded.
+        let server = MockOciRegistry::start(Some("Basic dGVuYW50LWE6c2VjcmV0LWE="));
+        let reference = server.reference("acme/secret:v1");
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let options = PullOptions {
+            pull_policy: PullPolicy::IfMissing,
+            ..Default::default()
+        };
+
+        // 1. Tenant A pulls with valid credentials.
+        let tenant_a = super::Registry::builder(Platform::host_linux(), cache.clone())
+            .auth(crate::RegistryAuth::Basic {
+                username: "tenant-a".into(),
+                password: "secret-a".into(),
+            })
+            .add_insecure_registries(vec![server.host()])
+            .build()
+            .unwrap();
+        let result = tenant_a.pull(&reference, &options).await.unwrap();
+        assert!(!result.cached);
+        assert_eq!(server.layer_blob_requests(), 1);
+
+        let metadata = cache.read_image_entry(&reference).unwrap().unwrap();
+        assert_eq!(metadata.pull_auth, CacheAuthProvenance::Authenticated);
+        let raw_json = std::fs::read_to_string(cache.image_metadata_path(&reference)).unwrap();
+        assert!(raw_json.contains("\"pull_auth\":\"authenticated\""));
+
+        // 2. Unauthenticated cache fast path must refuse the authenticated entry.
+        assert!(
+            super::Registry::pull_cached_async(&cache, &reference, &options)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // 3. Anonymous pull on the same shared cache must contact the registry and fail.
+        let anon = super::Registry::builder(Platform::host_linux(), cache.clone())
+            .add_insecure_registries(vec![server.host()])
+            .build()
+            .unwrap();
+        assert!(
+            anon.pull(&reference, &options).await.is_err(),
+            "anonymous pull must not reuse cached authenticated image"
+        );
+
+        // 4. Tenant B with wrong credentials on the same shared cache must also fail.
+        let tenant_b = super::Registry::builder(Platform::host_linux(), cache.clone())
+            .auth(crate::RegistryAuth::Basic {
+                username: "tenant-b".into(),
+                password: "wrong".into(),
+            })
+            .add_insecure_registries(vec![server.host()])
+            .build()
+            .unwrap();
+        assert!(
+            tenant_b.pull(&reference, &options).await.is_err(),
+            "other-tenant pull must not reuse cached authenticated image"
+        );
+
+        // 5. Tenant A retrying with valid credentials revalidates the manifest
+        //    against the registry but reuses the cached EROFS layer without re-downloading.
+        let manifests_before = server.manifest_requests();
+        let blobs_before = server.layer_blob_requests();
+        tenant_a.pull(&reference, &options).await.unwrap();
+        assert!(server.manifest_requests() > manifests_before);
+        assert_eq!(server.layer_blob_requests(), blobs_before);
+    }
+
+    #[tokio::test]
+    async fn test_anonymous_pull_warm_cache_hit_skips_registry_client() {
+        let server = MockOciRegistry::start(None);
+        let reference = server.reference("library/public:v1");
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let options = PullOptions {
+            pull_policy: PullPolicy::IfMissing,
+            ..Default::default()
+        };
+
+        let registry = super::Registry::builder(Platform::host_linux(), cache.clone())
+            .add_insecure_registries(vec![server.host()])
+            .build()
+            .unwrap();
+        let cold = registry.pull(&reference, &options).await.unwrap();
+        assert!(!cold.cached);
+
+        let metadata = cache.read_image_entry(&reference).unwrap().unwrap();
+        assert_eq!(metadata.pull_auth, CacheAuthProvenance::Anonymous);
+        let raw_json = std::fs::read_to_string(cache.image_metadata_path(&reference)).unwrap();
+        assert!(
+            raw_json.contains("\"pull_auth\":\"anonymous\""),
+            "anonymous metadata should explicitly record anonymous provenance: {raw_json}"
+        );
+
+        // Shut down the server completely so any network attempt would fail.
+        server.stop();
+
+        // Warm anonymous pull resolves directly from cache without building a Registry client.
+        let (warm, warm_meta) = super::Registry::pull_cached_async(&cache, &reference, &options)
+            .await
+            .unwrap()
+            .expect("public image should hit pull_cached_async");
+        assert!(warm.cached);
+        assert_eq!(warm.manifest_digest, cold.manifest_digest);
+        assert_eq!(warm_meta.manifest_digest, cold.manifest_digest.to_string());
+    }
+
+    #[tokio::test]
+    async fn test_legacy_unknown_provenance_revalidates_once_then_caches_anonymously() {
+        let server = MockOciRegistry::start(None);
+        let reference = server.reference("library/legacy:v1");
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let options = PullOptions {
+            pull_policy: PullPolicy::IfMissing,
+            ..Default::default()
+        };
+
+        let registry = super::Registry::builder(Platform::host_linux(), cache.clone())
+            .add_insecure_registries(vec![server.host()])
+            .build()
+            .unwrap();
+        let initial = registry.pull(&reference, &options).await.unwrap();
+        assert_eq!(server.layer_blob_requests(), 1);
+
+        // Simulate a legacy cache entry written before `pull_auth` existed (field omitted).
+        let legacy = cache.read_image_metadata(&reference).unwrap().unwrap();
+        cache
+            .write_image_metadata_async(&reference, &legacy)
+            .await
+            .unwrap();
+        let raw = std::fs::read_to_string(cache.image_metadata_path(&reference)).unwrap();
+        assert!(!raw.contains("pull_auth"));
+
+        // Unauthenticated fast path refuses unknown provenance.
+        assert!(
+            super::Registry::pull_cached_async(&cache, &reference, &options)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Next anonymous pull revalidates once with the registry (reusing cached layer blobs),
+        // then stamps explicit Anonymous provenance.
+        let manifests_before = server.manifest_requests();
+        let blobs_before = server.layer_blob_requests();
+        let revalidated = registry.pull(&reference, &options).await.unwrap();
+        assert_eq!(revalidated.manifest_digest, initial.manifest_digest);
+        assert!(server.manifest_requests() > manifests_before);
+        assert_eq!(server.layer_blob_requests(), blobs_before);
+        assert_eq!(
+            cache
+                .read_image_entry(&reference)
+                .unwrap()
+                .unwrap()
+                .pull_auth,
+            CacheAuthProvenance::Anonymous
+        );
+
+        // Subsequent anonymous pulls now hit the zero-network cache fast path.
+        server.stop();
+        assert!(
+            super::Registry::pull_cached_async(&cache, &reference, &options)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_digest_and_snapshot_cache_lookups_reject_authenticated_and_unknown_entries() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let reference: oci_client::Reference = "ghcr.io/acme/private:v1".parse().unwrap();
+
+        let metadata = write_cached_image_fixture(&cache, &reference, &[true]);
+        let manifest_digest: Digest = metadata.manifest_digest.parse().unwrap();
+
+        for provenance in [
+            CacheAuthProvenance::Authenticated,
+            CacheAuthProvenance::Unknown,
+        ] {
+            cache
+                .write_image_metadata_with_provenance_async(&reference, &metadata, provenance)
+                .await
+                .unwrap();
+
+            assert!(
+                super::Registry::pull_cached_by_manifest_digest(&cache, &manifest_digest)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{provenance:?} metadata must not be served by pull_cached_by_manifest_digest"
+            );
+            assert!(
+                super::Registry::pull_snapshot_cached(
+                    &cache,
+                    std::slice::from_ref(&reference),
+                    &manifest_digest,
+                    RootfsMaterialization::Layered,
+                )
+                .await
+                .unwrap()
+                .is_none(),
+                "{provenance:?} metadata must not be served by pull_snapshot_cached"
+            );
+            assert!(
+                super::Registry::pull_snapshot_cached_allow_restricted(
+                    &cache,
+                    std::slice::from_ref(&reference),
+                    &manifest_digest,
+                    RootfsMaterialization::Layered,
+                )
+                .await
+                .unwrap()
+                .is_some(),
+                "restricted lookup should succeed when caller explicitly owns isolated/bundled cache"
+            );
+        }
+
+        cache.write_image_metadata(&reference, &metadata).unwrap();
+        assert!(
+            super::Registry::pull_cached_by_manifest_digest(&cache, &manifest_digest)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            super::Registry::pull_snapshot_cached(
+                &cache,
+                std::slice::from_ref(&reference),
+                &manifest_digest,
+                RootfsMaterialization::Layered,
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_explicit_credentials_skip_anonymous_cache_entry_in_registry_pull() {
+        let server = MockOciRegistry::start(None);
+        let reference = server.reference("library/shared:v1");
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let options = PullOptions {
+            pull_policy: PullPolicy::IfMissing,
+            ..Default::default()
+        };
+
+        // Populate cache anonymously.
+        let anon = super::Registry::builder(Platform::host_linux(), cache.clone())
+            .add_insecure_registries(vec![server.host()])
+            .build()
+            .unwrap();
+        anon.pull(&reference, &options).await.unwrap();
+        let manifests_after_anon = server.manifest_requests();
+
+        // Pulling with explicit credentials must not shortcut through the anonymous cache entry.
+        let authed = super::Registry::builder(Platform::host_linux(), cache.clone())
+            .auth(crate::RegistryAuth::Basic {
+                username: "tenant-a".into(),
+                password: "secret".into(),
+            })
+            .add_insecure_registries(vec![server.host()])
+            .build()
+            .unwrap();
+        authed.pull(&reference, &options).await.unwrap();
+        assert!(
+            server.manifest_requests() > manifests_after_anon,
+            "authenticated Registry::pull must revalidate against the registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_isolated_caches_do_not_leak_across_directories() {
+        let server = MockOciRegistry::start(None);
+        let reference = server.reference("acme/org-image:v1");
+        let temp = tempdir().unwrap();
+        let shared_cache = GlobalCache::new(&temp.path().join("shared")).unwrap();
+        let org_a_cache = GlobalCache::new(&temp.path().join("orgs/org-a")).unwrap();
+        let org_b_cache = GlobalCache::new(&temp.path().join("orgs/org-b")).unwrap();
+        let options = PullOptions {
+            pull_policy: PullPolicy::IfMissing,
+            ..Default::default()
+        };
+
+        let org_a_registry = super::Registry::builder(Platform::host_linux(), org_a_cache.clone())
+            .add_insecure_registries(vec![server.host()])
+            .build()
+            .unwrap();
+        let pulled = org_a_registry.pull(&reference, &options).await.unwrap();
+        assert!(org_a_cache.vmdk_path(&pulled.manifest_digest).exists());
+
+        // Neither org-b nor the shared cache sees org-a's cached image.
+        assert!(
+            super::Registry::pull_cached_async(&org_b_cache, &reference, &options)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            super::Registry::pull_cached_async(&shared_cache, &reference, &options)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!org_b_cache.vmdk_path(&pulled.manifest_digest).exists());
+        assert!(!shared_cache.vmdk_path(&pulled.manifest_digest).exists());
     }
 }

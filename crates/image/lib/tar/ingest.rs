@@ -466,6 +466,34 @@ pub async fn ingest_compressed_tar<R: AsyncRead + Unpin>(
     }
 }
 
+/// Hash a bounded decompressed archive layer when its filesystem tree is cached.
+pub(crate) async fn hash_compressed_tar<R: AsyncRead + Unpin>(
+    reader: R,
+    compression: Compression,
+    limit: u64,
+) -> Result<String, IngestError> {
+    match compression {
+        Compression::None => hash_layer(reader, limit).await,
+        Compression::Gzip => {
+            let reader = BufReader::with_capacity(COMPRESSED_INPUT_BUFFER_SIZE, reader);
+            hash_layer(GzipDecoder::new(reader), limit).await
+        }
+        Compression::Zstd => {
+            let reader = BufReader::with_capacity(COMPRESSED_INPUT_BUFFER_SIZE, reader);
+            hash_layer(ZstdDecoder::new(reader), limit).await
+        }
+    }
+}
+
+async fn hash_layer<R: AsyncRead + Unpin>(reader: R, limit: u64) -> Result<String, IngestError> {
+    let mut hashing = HashingReader::new(reader.take(limit.saturating_add(1)));
+    drain_reader(&mut hashing).await?;
+    if hashing.inner.limit() == 0 {
+        return Err(IngestError::TotalSizeExceeded);
+    }
+    Ok(hashing.hex_digest())
+}
+
 /// Read all remaining bytes from a reader to ensure the full stream is
 /// consumed (and hashed, if wrapped in `HashingReader`). The tar parser
 /// may stop before the EOF padding; the diff_id covers the full stream.

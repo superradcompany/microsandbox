@@ -7,7 +7,7 @@
     "start": "npx tsx main.ts"
   },
   "dependencies": {
-    "microsandbox": "0.8.1"
+    "microsandbox": "0.8.3"
   },
   "devDependencies": {
     "tsx": "^4"

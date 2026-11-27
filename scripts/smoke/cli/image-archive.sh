@@ -79,3 +79,21 @@ grep -q '^blobs/sha256/' "$smoke_root/oci-entries.txt"
 
 MSB_HOME="$smoke_root/reload-home" "$MSB_BIN" load -i "$smoke_root/oci-output.tar" --quiet
 MSB_HOME="$smoke_root/reload-home" "$MSB_BIN" images -q | grep -qx "$TAG"
+
+# Use separate caches so a root prepared by one invocation cannot satisfy the other.
+export MSB_CONFIG_PATH="$smoke_root/flat-config.json"
+printf '%s\n' '{"sandbox_defaults":{"oci":{"root_disk":{"kind":"flat"}}}}' > "$MSB_CONFIG_PATH"
+
+flat_home="$smoke_root/flat-default"
+MSB_HOME="$flat_home" "$MSB_BIN" load --tag "$TAG" --quiet < "$smoke_root/docker-input.tar"
+if ! compgen -G "$flat_home/cache/flat/blobs/*.raw" > /dev/null || compgen -G "$flat_home/cache/vmdk/*.vmdk" > /dev/null; then
+  echo "plain load should prepare only a flat root with a flat OCI default" >&2
+  exit 1
+fi
+
+layered_home="$smoke_root/layered-override"
+MSB_HOME="$layered_home" "$MSB_BIN" image load --materialize layered -i "$smoke_root/docker-input.tar" --tag "$TAG" --quiet
+if ! compgen -G "$layered_home/cache/vmdk/*.vmdk" > /dev/null || compgen -G "$layered_home/cache/flat/blobs/*.raw" > /dev/null; then
+  echo "explicit --materialize layered should override the flat OCI default" >&2
+  exit 1
+fi

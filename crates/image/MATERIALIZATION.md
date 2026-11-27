@@ -1,6 +1,6 @@
 # OCI rootfs materialization
 
-This document specifies how one verified OCI layer pipeline feeds microsandbox's layered and flat rootfs representations. It is an implementation contract for `microsandbox-image`; user-facing selection is documented under `msb pull --materialize`.
+This document specifies how one verified OCI layer pipeline feeds microsandbox's layered and flat rootfs representations. The same materialization targets are available through `msb pull --materialize` and `msb load --materialize`.
 
 ## Goals
 

@@ -193,6 +193,10 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_prepared_sources:
         Option<std::sync::Arc<crate::context::local::snapshot::PreparedLaunchSource>>,
+    /// Owned archive backing verified for the selected installed snapshot.
+    #[cfg(feature = "local")]
+    #[serde(skip)]
+    pub(crate) snapshot_has_bundled_image: bool,
     /// Operation-local observer; never persisted or retained as a stream owner.
     #[cfg(feature = "local")]
     #[serde(skip)]
@@ -217,6 +221,14 @@ pub struct SandboxConfig {
     /// Additional PEM-encoded CA certs (SDK override).
     #[serde(skip)]
     pub(crate) ca_certs: Vec<Vec<u8>>,
+
+    /// Optional override for the OCI image cache directory used by this sandbox.
+    ///
+    /// Persisted for local sandboxes so subsequent restarts locate the VMDK
+    /// descriptor in the same isolated cache directory that materialized it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[config_patch(nullable)]
+    pub image_cache_dir: Option<PathBuf>,
 
     /// Replace an existing sandbox with the same name during create.
     ///
@@ -611,6 +623,11 @@ impl OciSandboxDefaultsPatch {
 }
 
 impl SandboxConfig {
+    /// Return the resolved OCI manifest digest pinned at sandbox creation, if any.
+    pub fn manifest_digest(&self) -> Option<&str> {
+        self.manifest_digest.as_deref()
+    }
+
     /// Only a proven omission with unchanged defaults may select a legacy response behavior.
     #[cfg(feature = "net")]
     pub(crate) fn has_implicit_http_defaults(&self) -> bool {
@@ -641,6 +658,7 @@ impl SandboxConfig {
         #[cfg(feature = "local")]
         {
             self.snapshot_prepared_sources = None;
+            self.snapshot_has_bundled_image = false;
             self.checkpoint_restore = None;
             self.snapshot_upper_layers.clear();
         }
@@ -1520,8 +1538,11 @@ impl Default for SandboxConfig {
             snapshot_expected_digest: None,
             #[cfg(feature = "local")]
             snapshot_prepared_sources: None,
+            #[cfg(feature = "local")]
+            snapshot_has_bundled_image: false,
             insecure: false,
             ca_certs: Vec::new(),
+            image_cache_dir: None,
             replace_existing: false,
             replace_with_timeout: DEFAULT_REPLACE_TIMEOUT,
             slug: None,

@@ -153,6 +153,9 @@ pub(crate) fn resolve_patch_paths(patch: &mut crate::SandboxConfigPatch) -> Micr
             tls.intercept_ca = Some(resolved.intercept_ca);
         }
     }
+    if matches!(&patch.image_cache_dir, Some(Some(_))) {
+        patch.image_cache_dir = Some(config.image_cache_dir);
+    }
     patch.snapshot_reference = config.snapshot_reference;
     patch.snapshot_archive_source = config.snapshot_archive_source;
     patch.snapshot_base = config.snapshot_base;
@@ -224,6 +227,15 @@ fn visit_host_paths(
                 | Patch::Append { .. } => {}
             }
         }
+    }
+
+    if let Some(path) = &mut config.image_cache_dir {
+        if path.as_os_str().is_empty() {
+            return Err(MicrosandboxError::InvalidConfig(
+                "image cache directory must not be empty".into(),
+            ));
+        }
+        visit(path, "image cache directory")?;
     }
 
     // TLS files are reopened on every boot too. A different cwd must not select

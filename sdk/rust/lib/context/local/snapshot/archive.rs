@@ -79,6 +79,20 @@ const GNU_EXT_SPARSE_SLOTS: usize = 21;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+struct PendingVmdkRepair {
+    cache: microsandbox_image::GlobalCache,
+    manifest: microsandbox_image::Digest,
+    layers: Vec<microsandbox_image::Digest>,
+}
+
+struct StagedCacheInstall {
+    stage: PathBuf,
+    reference: microsandbox_image::Reference,
+    metadata: Vec<u8>,
+    files: HashSet<PathBuf>,
+    vmdk: Option<PendingVmdkRepair>,
+}
+
 /// Operation-owned import facts; legacy callers still receive their archive-head handles.
 pub(super) struct ImportedBatch {
     pub(super) operation_id: String,
@@ -221,6 +235,8 @@ struct CheckpointArchiveMember {
 /// Child construction state streamed from one archive without installing a snapshot artifact.
 pub(crate) struct ArchiveChildMaterialization {
     pub(crate) cache_operation: microsandbox_image::GlobalCache,
+    /// Whether the archive itself bundled and installed OCI image cache files.
+    pub(crate) bundled_image: bool,
     pub(crate) manifest: microsandbox_image::snapshot::Manifest,
     pub(crate) checkpoint_restore: Option<microsandbox_runtime::launch::CheckpointRestoreConfig>,
     pub(crate) upper_layers: Vec<microsandbox_runtime::launch::RootfsUpperLayerConfig>,
@@ -252,9 +268,43 @@ struct SparseMap {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl PendingVmdkRepair {
+    async fn finish(self) -> MicrosandboxResult<()> {
+        self.cache
+            .rewrite_vmdk_async(&self.manifest, &self.layers)
+            .await?;
+        Ok(())
+    }
+}
+
+impl StagedCacheInstall {
+    async fn install_backing(
+        self,
+        cache_dir: &Path,
+    ) -> MicrosandboxResult<Option<PendingVmdkRepair>> {
+        for source in &self.files {
+            install_cache_file(source, &self.stage, cache_dir).await?;
+        }
+        if let Some(vmdk) = self.vmdk {
+            vmdk.cache
+                .install_vmdk_if_missing_async(&vmdk.manifest, &vmdk.layers)
+                .await?;
+            if !vmdk
+                .cache
+                .is_vmdk_complete_for_layers(&vmdk.manifest, &vmdk.layers)
+            {
+                // Replacing an existing descriptor must wait until the import is accepted.
+                return Ok(Some(vmdk));
+            }
+        }
+        Ok(None)
+    }
+}
+
 impl LocalContext {
     /// Admit restore-only boot policy at the existing descriptor parse point, before
     /// materializing checkpoint resources or publishing the child.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn materialize_archive_for_child(
         &self,
         archive: &Path,
@@ -263,11 +313,12 @@ impl LocalContext {
         base: Option<&str>,
         choices: &crate::sandbox::restore_resources::RestoreResources,
         caller_overrides: Option<&crate::SandboxConfigPatch>,
+        image_cache_dir: Option<&Path>,
     ) -> MicrosandboxResult<ArchiveChildMaterialization> {
         let total_started = Instant::now();
         tokio::fs::create_dir_all(child_stage).await?;
 
-        let cache_dir = self.cache_dir();
+        let cache_dir = self.resolve_image_cache_dir(image_cache_dir)?;
         let cache_tmp_dir = cache_dir.join("tmp");
         tokio::fs::create_dir_all(&cache_tmp_dir).await?;
 
@@ -363,7 +414,7 @@ impl LocalContext {
 
             tokio::fs::rename(head.layer_path(layer), child_stage.join(DEFAULT_UPPER_FILE)).await?;
 
-            let cache_operation =
+            let (cache_operation, bundled_image) =
                 install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
 
             for directory in unpacked.manifest_dirs {
@@ -380,6 +431,7 @@ impl LocalContext {
 
             return Ok(ArchiveChildMaterialization {
                 cache_operation,
+                bundled_image,
                 manifest,
                 checkpoint_restore: None,
                 upper_layers: Vec::new(),
@@ -452,6 +504,8 @@ impl LocalContext {
             )?;
         }
         delta::resolve(self, &inventory, child_stage, cache_stage.path(), base).await?;
+        // Extraction and dependency resolution leave private copies in child staging.
+        let extracted_stage = child_stage.for_child_private_sources();
 
         if let SnapshotState::Checkpoint(state) = &manifest.state {
             let member_dir = child_stage.join(&member.snapshot_id);
@@ -465,14 +519,14 @@ impl LocalContext {
                     &extracted_closure,
                     &state.checkpoint_root,
                     &state.checkpoint_id,
-                    child_stage,
+                    &extracted_stage,
                     &manifest.root_disk,
                     choices,
                     self.config().fs_state_limit(),
                 )
                 .await?;
 
-                let cache_operation =
+                let (cache_operation, bundled_image) =
                     install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
 
                 for member in &inventory.members {
@@ -490,6 +544,7 @@ impl LocalContext {
 
                 return Ok(ArchiveChildMaterialization {
                     cache_operation,
+                    bundled_image,
                     manifest,
                     checkpoint_restore: None,
                     upper_layers: materialized.upper_layers,
@@ -511,7 +566,7 @@ impl LocalContext {
             )
             .await?;
 
-            let cache_operation =
+            let (cache_operation, bundled_image) =
                 install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
 
             for member in &inventory.members {
@@ -526,6 +581,7 @@ impl LocalContext {
 
             return Ok(ArchiveChildMaterialization {
                 cache_operation,
+                bundled_image,
                 manifest,
                 checkpoint_restore: Some(materialized.restore),
                 upper_layers: materialized.upper_layers,
@@ -573,7 +629,7 @@ impl LocalContext {
         let mut materialized = super::materialize_file_snapshot_for_child(
             &sources,
             file.virtual_size,
-            child_stage,
+            &extracted_stage,
             &manifest.root_disk,
         )
         .await?;
@@ -581,7 +637,7 @@ impl LocalContext {
         materialized.disk_mounts = super::materialize_owned_volumes(
             &manifest.owned_volumes()?,
             &child_stage.join(&member.snapshot_id),
-            child_stage,
+            &extracted_stage,
             choices,
         )
         .await?;
@@ -589,7 +645,7 @@ impl LocalContext {
             tokio::fs::remove_dir_all(&archive_layers).await?;
         }
 
-        let cache_operation =
+        let (cache_operation, bundled_image) =
             install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
 
         for member in &inventory.members {
@@ -604,6 +660,7 @@ impl LocalContext {
 
         Ok(ArchiveChildMaterialization {
             cache_operation,
+            bundled_image,
             manifest,
             checkpoint_restore: None,
             upper_layers: materialized.upper_layers,
@@ -877,7 +934,13 @@ pub(super) async fn save_archive(
     // Optional image cache bundling.
     let mut cache_files: Vec<(PathBuf, String)> = Vec::new();
     let mut admitted_metadata = None;
-    let cache_operation = microsandbox_image::GlobalCache::new_async(&local.cache_dir())
+    let image_cache_dir = if opts.with_image {
+        super::cache_binding::read_managed(local, head.path(), head.digest())?
+    } else {
+        None
+    };
+    let cache_dir = local.resolve_image_cache_dir(image_cache_dir.as_deref())?;
+    let cache_operation = microsandbox_image::GlobalCache::new_async(&cache_dir)
         .await?
         .operation();
     if opts.with_image {
@@ -891,27 +954,37 @@ pub(super) async fn save_archive(
             head.manifest().image.reference.parse().map_err(|e| {
                 MicrosandboxError::Custom(format!("invalid snapshot image reference: {e}"))
             })?;
-        let metadata = cache
-            .read_image_metadata_async(&image_ref)
-            .await?
-            .ok_or_else(|| {
-                MicrosandboxError::Custom(format!(
-                    "image metadata missing from cache for {}",
-                    head.manifest().image.reference
-                ))
-            })?;
-        cache
-            .lease_paths_async(cache.metadata_paths(&metadata)?)
-            .await?;
-        if metadata.manifest_digest != img_digest_str {
-            return Err(MicrosandboxError::Custom(format!(
-                "cached image metadata digest mismatch: snapshot={}, cache={}",
-                img_digest_str, metadata.manifest_digest
-            )));
-        }
+        let pinned_ref = microsandbox_image::Reference::with_digest(
+            image_ref.registry().to_owned(),
+            image_ref.repository().to_owned(),
+            img_digest_str,
+        );
+        // Flat snapshots already own their complete root. A bundled ancestor
+        // can still require the complete layered backing.
+        let materialization = if snapshots.iter().any(|snapshot| {
+            snapshot.manifest().root_disk != microsandbox_image::snapshot::SnapshotRootDisk::Flat
+        }) {
+            microsandbox_image::RootfsMaterialization::Layered
+        } else {
+            microsandbox_image::RootfsMaterialization::Flat
+        };
+        let (_, metadata) = microsandbox_image::Registry::pull_snapshot_cached_allow_restricted(
+            &cache,
+            &[pinned_ref, image_ref.clone()],
+            &img_digest,
+            materialization,
+        )
+        .await?
+        .ok_or_else(|| {
+            MicrosandboxError::Custom(format!(
+                "pinned image backing is missing from cache for {}",
+                head.manifest().image.reference
+            ))
+        })?;
 
         // The tag can change after admission. Bundle the metadata we actually validated,
         // not a later reopen of that mutable pathname alongside the old generation's layers.
+        // Strip host-local auth provenance so portable archives never claim anonymous registry access.
         let staging = tempfile::tempdir_in(cache.tmp_dir())?;
         let metadata_path = staging
             .path()
@@ -920,12 +993,7 @@ pub(super) async fn save_archive(
         admitted_metadata = Some(staging);
         push_required_cache_file(&mut cache_files, &metadata_path, "manifests")?;
 
-        // Flat snapshots already own a complete root disk. Their offline dependency is
-        // image configuration, not a second (layered) materialization of the same image.
-        // A bundled ancestor may still need the full layered cache.
-        if snapshots.iter().any(|snapshot| {
-            snapshot.manifest().root_disk != microsandbox_image::snapshot::SnapshotRootDisk::Flat
-        }) {
+        if materialization == microsandbox_image::RootfsMaterialization::Layered {
             let fsmeta = cache.fsmeta_erofs_path(&img_digest);
             push_required_cache_file(&mut cache_files, &fsmeta, "fsmeta")?;
 
@@ -1655,6 +1723,7 @@ pub(crate) async fn materialize_archive_for_child_with_base(
             base,
             choices,
             Default::default(),
+            None,
         )
         .await
 }
@@ -4146,12 +4215,35 @@ async fn install_staged_cache(
     cache_stage: &Path,
     cache_dir: &Path,
     manifest: &microsandbox_image::snapshot::Manifest,
-) -> MicrosandboxResult<microsandbox_image::GlobalCache> {
+) -> MicrosandboxResult<(microsandbox_image::GlobalCache, bool)> {
     let cache = microsandbox_image::GlobalCache::new_async(cache_dir)
         .await?
         .operation();
+    let Some(mut staged) =
+        prepare_staged_cache_install(cache_stage, cache_dir, &cache, manifest).await?
+    else {
+        return Ok((cache, false));
+    };
+    let metadata = std::mem::take(&mut staged.metadata);
+    let publication = cache
+        .prepare_image_metadata_install(&staged.reference, metadata)
+        .await?;
+    let repair = staged.install_backing(cache_dir).await?;
+    publication.commit().await?;
+    if let Some(repair) = repair {
+        repair.finish().await?;
+    }
+    Ok((cache, true))
+}
+
+async fn prepare_staged_cache_install(
+    cache_stage: &Path,
+    cache_dir: &Path,
+    cache: &microsandbox_image::GlobalCache,
+    manifest: &microsandbox_image::snapshot::Manifest,
+) -> MicrosandboxResult<Option<StagedCacheInstall>> {
     if !contains_files(cache_stage)? {
-        return Ok(cache);
+        return Ok(None);
     }
 
     let image_ref: microsandbox_image::Reference =
@@ -4163,15 +4255,15 @@ async fn install_staged_cache(
             MicrosandboxError::Custom(format!("invalid snapshot image digest: {e}"))
         })?;
     let staged_cache = microsandbox_image::GlobalCache::new_async(cache_stage).await?;
-    let metadata = staged_cache
-        .read_image_metadata_async(&image_ref)
-        .await?
-        .ok_or_else(|| {
-            MicrosandboxError::Custom(format!(
-                "snapshot image cache metadata missing for {}",
-                manifest.image.reference
-            ))
-        })?;
+    let metadata_path = staged_cache.image_metadata_path(&image_ref);
+    let archived_metadata = tokio::fs::read(&metadata_path).await.map_err(|error| {
+        MicrosandboxError::Custom(format!(
+            "snapshot image cache metadata unavailable for {}: {error}",
+            manifest.image.reference
+        ))
+    })?;
+    microsandbox_image::snapshot::manifest::reject_duplicate_json_keys(&archived_metadata)?;
+    let metadata = serde_json::from_slice(&archived_metadata)?;
     validate_cached_metadata(manifest, &metadata)?;
     let mut leased_paths = cache.metadata_paths(&metadata)?;
     leased_paths.push(cache.image_metadata_path(&image_ref));
@@ -4185,32 +4277,47 @@ async fn install_staged_cache(
         manifest.root_disk.clone(),
     )?;
     ensure_only_expected_cache_files(cache_stage, &expected_files)?;
-    // The staged VMDK lists the exporter's extent paths; it is rewritten below for this cache.
-    let rewrite_vmdk = expected_files.remove(&staged_cache.vmdk_path(&pinned_digest));
+    // A staged descriptor contains paths on its source host. Check conflicts
+    // before deciding whether the destination needs repair.
+    let install_vmdk = expected_files.remove(&staged_cache.vmdk_path(&pinned_digest));
+    if install_vmdk {
+        let vmdk = cache.vmdk_path(&pinned_digest);
+        match tokio::fs::symlink_metadata(&vmdk).await {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => {
+                return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                    "image cache descriptor is not a regular file: {}",
+                    vmdk.display()
+                )));
+            }
+        }
+    }
+    expected_files.remove(&metadata_path);
     ensure_cache_targets_compatible(&expected_files, cache_stage, cache_dir).await?;
 
-    let metadata_path = staged_cache.image_metadata_path(&image_ref);
-    for source in expected_files.iter().filter(|path| **path != metadata_path) {
-        install_cache_file(source, cache_stage, cache_dir).await?;
-    }
-    if rewrite_vmdk {
-        let diff_ids = metadata
+    let vmdk = if install_vmdk {
+        let layers = metadata
             .layers
             .iter()
             .map(|layer| layer.diff_id.parse())
-            .collect::<Result<Vec<microsandbox_image::Digest>, _>>()
-            .map_err(|e| MicrosandboxError::Custom(format!("invalid cached layer diff_id: {e}")))?;
-        // Keep the imported cache paths pinned while the rewrite completes.
-        cache.rewrite_vmdk_async(&pinned_digest, &diff_ids).await?;
-    }
-    // The archive may describe an image already installed under this reference. Publish under
-    // the image-cache gate, preserving equivalent local bytes and rejecting a concurrent retag.
-    let archived_metadata = tokio::fs::read(&metadata_path).await?;
-    cache
-        .install_image_metadata_if_compatible_async(&image_ref, archived_metadata)
-        .await?;
-
-    Ok(cache)
+            .collect::<Result<Vec<_>, _>>()?;
+        Some(PendingVmdkRepair {
+            cache: cache.clone(),
+            manifest: pinned_digest,
+            layers,
+        })
+    } else {
+        None
+    };
+    Ok(Some(StagedCacheInstall {
+        stage: cache_stage.to_path_buf(),
+        reference: image_ref,
+        metadata: archived_metadata,
+        files: expected_files,
+        vmdk,
+    }))
 }
 
 fn validate_cached_metadata(
@@ -4384,15 +4491,16 @@ async fn install_cache_file(
     cache_dir: &Path,
 ) -> MicrosandboxResult<()> {
     let target = cache_install_target(source, cache_stage, cache_dir)?;
-    if tokio::fs::symlink_metadata(&target).await.is_ok() {
-        ensure_cache_target_compatible(source, &target).await?;
-        return Ok(());
-    }
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::rename(source, target).await?;
-    Ok(())
+    match tokio::fs::hard_link(source, &target).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            ensure_cache_target_compatible(source, &target).await
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn cache_install_target(
@@ -4410,8 +4518,10 @@ fn cache_install_target(
 }
 
 async fn ensure_cache_target_compatible(source: &Path, target: &Path) -> MicrosandboxResult<()> {
-    let Ok(metadata) = tokio::fs::symlink_metadata(target).await else {
-        return Ok(());
+    let metadata = match tokio::fs::symlink_metadata(target).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
     };
     if !metadata.file_type().is_file() {
         return Err(MicrosandboxError::Custom(format!(
@@ -4438,25 +4548,14 @@ async fn ensure_cache_target_compatible(source: &Path, target: &Path) -> Microsa
     Ok(())
 }
 
-/// Whether both files parse as JSON documents with equal values, ignoring object key order.
+/// Whether both files parse as JSON documents with equal immutable content, ignoring
+/// object key order and host-local auth provenance markers.
 async fn json_files_equivalent(source: &Path, target: &Path) -> bool {
     let (Ok(source), Ok(target)) = (tokio::fs::read(source).await, tokio::fs::read(target).await)
     else {
         return false;
     };
-    // `Value` keeps only the last of duplicate keys, which the typed cache reader rejects.
-    if microsandbox_image::snapshot::manifest::reject_duplicate_json_keys(&source).is_err()
-        || microsandbox_image::snapshot::manifest::reject_duplicate_json_keys(&target).is_err()
-    {
-        return false;
-    }
-    match (
-        serde_json::from_slice::<serde_json::Value>(&source),
-        serde_json::from_slice::<serde_json::Value>(&target),
-    ) {
-        (Ok(source), Ok(target)) => source == target,
-        _ => false,
-    }
+    microsandbox_image::image_metadata_json_equivalent(&source, &target)
 }
 
 async fn file_sha256(path: &Path) -> MicrosandboxResult<[u8; 32]> {
@@ -4641,6 +4740,7 @@ pub async fn fuzz_unpack_local_snapshot_archive(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use std::slice;
+    use std::sync::Arc;
 
     use microsandbox_image::checkpoint::{
         CaptureIntent, CheckpointManifest, ContentRef, DeviceStateRef, DiskGenerationManifest,
@@ -5971,10 +6071,11 @@ mod tests {
         let local = crate::test_support::local_backend_builder(directory.path().join("source"))
             .build()
             .unwrap();
-        let destination =
+        let destination = Arc::new(
             crate::test_support::local_backend_builder(directory.path().join("destination"))
                 .build()
-                .unwrap();
+                .unwrap(),
+        );
         let mut manifest = grouped_archive_manifest(31, None);
         manifest.root_disk = SnapshotRootDisk::Flat;
         let image_ref = manifest.image.reference.parse().unwrap();
@@ -5991,7 +6092,8 @@ mod tests {
             config: microsandbox_image::ImageConfig::default(),
             layers: Vec::new(),
         };
-        let cache = microsandbox_image::GlobalCache::new_async(&local.cache_dir())
+        let isolated = directory.path().join("source-isolated-cache");
+        let cache = microsandbox_image::GlobalCache::new_async(&isolated)
             .await
             .unwrap();
         cache
@@ -6009,8 +6111,10 @@ mod tests {
             .is_err(),
             "a managed root must still require its complete layered base"
         );
-        let artifact = directory.path().join("flat-snapshot");
+        let artifact = local.snapshots_dir().join("flat-snapshot");
         write_grouped_archive_fixture(&artifact, &manifest);
+        super::super::cache_binding::write(&artifact, &manifest.digest().unwrap(), &isolated)
+            .unwrap();
         let archive = directory.path().join("flat.msb");
         save_snapshot(
             &local,
@@ -6018,12 +6122,62 @@ mod tests {
             &archive,
             SaveOpts {
                 with_image: true,
+                plain_tar: true,
                 ..Default::default()
             },
         )
         .await
         .unwrap();
+        let mut exported = tar::Archive::new(std::fs::File::open(&archive).unwrap());
+        for entry in exported.entries().unwrap() {
+            let entry = entry.unwrap();
+            assert_ne!(
+                entry.path().unwrap().file_name().unwrap(),
+                super::super::cache_binding::FILENAME
+            );
+        }
         let loaded = load_snapshot(&destination, &archive, None).await.unwrap();
+        let mut sibling = manifest.clone();
+        sibling.snapshot_id = SnapshotId::new("snap_00000000000000000000000000000023").unwrap();
+        let sibling_path = local.snapshots_dir().join("sibling-snapshot");
+        write_grouped_archive_fixture(&sibling_path, &sibling);
+        super::super::cache_binding::write(&sibling_path, &sibling.digest().unwrap(), &isolated)
+            .unwrap();
+        let sibling_archive = directory.path().join("sibling.msb");
+        save_snapshot(
+            &local,
+            sibling_path.to_str().unwrap(),
+            &sibling_archive,
+            SaveOpts {
+                with_image: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let result = load_snapshots(
+            &destination,
+            &[archive, sibling_archive],
+            LoadOpts {
+                group: Some("ambiguous".into()),
+                set_head: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let Err(MicrosandboxError::SnapshotImport(error)) = result else {
+            panic!("expected an ambiguous head to prevent import");
+        };
+        assert_eq!(error.outcome, crate::SnapshotImportOutcome::NotCommitted);
+        assert!(error.detail.contains("head"), "{error}");
+        assert!(
+            !super::super::cache_binding::has_bundle(
+                &destination.cache_dir(),
+                &sibling.digest().unwrap()
+            )
+            .unwrap(),
+            "the rejected batch must not authorize offline use of its uncommitted member"
+        );
         assert_eq!(
             store::open_snapshot_leased(&destination, loaded.path().to_str().unwrap())
                 .await
@@ -6046,6 +6200,42 @@ mod tests {
         );
         assert!(!imported.fsmeta_erofs_path(&digest).exists());
         assert!(!imported.vmdk_path(&digest).exists());
+        let mut restore = crate::SandboxConfig::default();
+        restore.spec.pull_policy = crate::sandbox::PullPolicy::Never;
+        destination
+            .prepare_local_restore(
+                destination.clone(),
+                &mut restore,
+                crate::SnapshotReference::path(loaded.path().to_string_lossy()),
+            )
+            .await
+            .unwrap();
+        assert!(restore.snapshot_has_bundled_image);
+        assert_eq!(
+            restore.manifest_digest(),
+            Some(metadata.manifest_digest.as_str())
+        );
+        let key = image_ref.clone();
+        let resolved = microsandbox_image::Registry::pull_snapshot_cached_allow_restricted(
+            &imported,
+            std::slice::from_ref(&key),
+            &digest,
+            microsandbox_image::RootfsMaterialization::Flat,
+        )
+        .await
+        .unwrap();
+        assert!(resolved.is_some());
+        assert!(
+            microsandbox_image::Registry::pull_snapshot_cached(
+                &imported,
+                &[key],
+                &digest,
+                microsandbox_image::RootfsMaterialization::Flat,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
 
         // A purported complete cache may not smuggle a truncated layered payload through
         // the metadata-only exception. The remaining layered closure is still required.
@@ -6059,6 +6249,334 @@ mod tests {
                 SnapshotRootDisk::Flat
             )
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn supplied_snapshot_sidecar_cannot_select_another_tenants_private_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let local = Arc::new(
+            crate::test_support::local_backend_builder(directory.path().join("home"))
+                .build()
+                .unwrap(),
+        );
+        let victim_cache_dir = directory.path().join("orgs/victim/cache");
+        let victim_cache = microsandbox_image::GlobalCache::new_async(&victim_cache_dir)
+            .await
+            .unwrap();
+        let mut manifest = grouped_archive_manifest(33, None);
+        manifest.root_disk = SnapshotRootDisk::Flat;
+        let image_ref: microsandbox_image::Reference = manifest.image.reference.parse().unwrap();
+        let raw_config_json = "{}".to_string();
+        let metadata = microsandbox_image::CachedImageMetadata {
+            manifest_digest: manifest.image.manifest_digest.clone(),
+            config_digest: format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(raw_config_json.as_bytes()))
+            ),
+            raw_manifest_json: r#"{"schemaVersion":2,"layers":[]}"#.into(),
+            raw_config_json,
+            config: microsandbox_image::ImageConfig::default(),
+            layers: Vec::new(),
+        };
+        victim_cache
+            .write_image_metadata_with_provenance_async(
+                &image_ref,
+                &metadata,
+                microsandbox_image::CacheAuthProvenance::Authenticated,
+            )
+            .await
+            .unwrap();
+
+        // 1. An externally supplied snapshot directory carrying a crafted `image-cache.json`
+        //    must never nominate another tenant's cache via restore, path-set launch, or export.
+        let external = directory.path().join("attacker-supplied-snapshot");
+        write_grouped_archive_fixture(&external, &manifest);
+        let descriptor_digest = manifest.digest().unwrap();
+        let forged_sidecar = serde_json::json!({
+            "descriptor_digest": descriptor_digest,
+            "cache_dir": victim_cache_dir,
+        });
+        std::fs::write(
+            external.join(super::super::cache_binding::FILENAME),
+            serde_json::to_vec(&forged_sidecar).unwrap(),
+        )
+        .unwrap();
+
+        let mut direct_restore = crate::SandboxConfig::default();
+        local
+            .prepare_local_restore(
+                local.clone(),
+                &mut direct_restore,
+                crate::SnapshotReference::path(external.to_string_lossy()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(direct_restore.image_cache_dir, None);
+
+        let mut path_set_restore = crate::SandboxConfig::default();
+        launch::prepare(
+            local.clone(),
+            &mut path_set_restore,
+            vec![external.clone()],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(path_set_restore.image_cache_dir, None);
+
+        let exported = directory.path().join("stolen.msb");
+        let export_err = save_snapshot(
+            &local,
+            external.to_str().unwrap(),
+            &exported,
+            SaveOpts {
+                with_image: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            export_err.to_string().contains("missing from cache"),
+            "unexpected export error: {export_err}"
+        );
+
+        // 2. Even inside `snapshots_dir`, a forged sidecar without a host-written receipt in
+        //    `victim_cache/snapshot-bindings/` must be rejected.
+        let managed = local.snapshots_dir().join("forged-managed-snapshot");
+        write_grouped_archive_fixture(&managed, &manifest);
+        std::fs::write(
+            managed.join(super::super::cache_binding::FILENAME),
+            serde_json::to_vec(&forged_sidecar).unwrap(),
+        )
+        .unwrap();
+
+        let mut managed_restore = crate::SandboxConfig::default();
+        let err = local
+            .prepare_local_restore(
+                local.clone(),
+                &mut managed_restore,
+                crate::SnapshotReference::path(managed.to_string_lossy()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid local image cache binding"),
+            "unexpected managed error: {err}"
+        );
+
+        let mut managed_path_set = crate::SandboxConfig::default();
+        let err = launch::prepare(
+            local.clone(),
+            &mut managed_path_set,
+            vec![managed.clone()],
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid local image cache binding"),
+            "unexpected managed path-set error: {err}"
+        );
+
+        // 3. A host-created custom `dest_dir` snapshot (outside `snapshots_dir`) with a valid
+        //    host-written binding receipt in its cache still exports `--with-image` cleanly.
+        let mut custom_manifest = manifest.clone();
+        custom_manifest.snapshot_id =
+            SnapshotId::new("snap_00000000000000000000000000000034").unwrap();
+        let custom_digest = custom_manifest.digest().unwrap();
+        let custom_dest = directory.path().join("custom-dest-snapshot");
+        write_grouped_archive_fixture(&custom_dest, &custom_manifest);
+        super::super::cache_binding::write(&custom_dest, &custom_digest, &victim_cache_dir)
+            .unwrap();
+        let custom_exported = directory.path().join("custom-dest.msb");
+        save_snapshot(
+            &local,
+            custom_dest.to_str().unwrap(),
+            &custom_exported,
+            SaveOpts {
+                with_image: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(custom_exported.is_file());
+    }
+
+    #[tokio::test]
+    async fn conflicting_bundle_leaves_existing_cache_files_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        let staged_root = directory.path().join("staged");
+        let cache_root = directory.path().join("cache");
+        let staged = microsandbox_image::GlobalCache::new(&staged_root).unwrap();
+        let cache = microsandbox_image::GlobalCache::new(&cache_root).unwrap();
+        let manifest = grouped_archive_manifest(33, None);
+        let reference = manifest.image.reference.parse().unwrap();
+        let digest = manifest.image.manifest_digest.parse().unwrap();
+        let diff_id: microsandbox_image::Digest =
+            format!("sha256:{}", "b".repeat(64)).parse().unwrap();
+        let raw_config_json = "{}".to_string();
+        let metadata = microsandbox_image::CachedImageMetadata {
+            manifest_digest: manifest.image.manifest_digest.clone(),
+            config_digest: format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(raw_config_json.as_bytes()))
+            ),
+            raw_manifest_json: r#"{"schemaVersion":2,"layers":[]}"#.into(),
+            raw_config_json,
+            config: microsandbox_image::ImageConfig::default(),
+            layers: vec![microsandbox_image::CachedLayerMetadata {
+                digest: format!("sha256:{}", "c".repeat(64)),
+                diff_id: diff_id.to_string(),
+                media_type: None,
+                size_bytes: None,
+            }],
+        };
+        let mut conflicting = metadata.clone();
+        conflicting.manifest_digest = format!("sha256:{}", "d".repeat(64));
+        staged
+            .write_image_metadata_async(&reference, &metadata)
+            .await
+            .unwrap();
+        cache
+            .write_image_metadata_async(&reference, &conflicting)
+            .await
+            .unwrap();
+
+        let tree = microsandbox_image::tree::FileTree::new();
+        let fsmeta = staged.fsmeta_erofs_path(&digest);
+        let layer = staged.layer_erofs_path(&diff_id);
+        microsandbox_image::erofs::write_erofs(&tree, &fsmeta).unwrap();
+        microsandbox_image::erofs::write_erofs(&tree, &layer).unwrap();
+        // Staged VMDKs are opaque to import and never copied as-is.
+        std::fs::write(staged.vmdk_path(&digest), b"exporter's descriptor").unwrap();
+
+        let existing_vmdk = cache.vmdk_path(&digest);
+        let existing_layer = cache.layer_erofs_path(&diff_id);
+        let existing_metadata = cache.image_metadata_path(&reference);
+        std::fs::copy(&layer, &existing_layer).unwrap();
+        std::fs::write(&existing_vmdk, b"existing descriptor must survive").unwrap();
+        let before = [&existing_vmdk, &existing_layer, &existing_metadata]
+            .map(|path| std::fs::read(path).unwrap());
+
+        let error = install_staged_cache(&staged_root, &cache_root, &manifest)
+            .await
+            .err()
+            .expect("conflicting metadata must reject the bundle");
+        assert!(
+            error
+                .to_string()
+                .contains("cache target already exists with different content")
+        );
+        assert!(!cache.fsmeta_erofs_path(&digest).exists());
+        assert_eq!(
+            [existing_vmdk, existing_layer, existing_metadata]
+                .map(|path| std::fs::read(path).unwrap()),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn with_image_archive_strips_auth_provenance_and_materializes_into_isolated_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = crate::test_support::local_backend_builder(directory.path().join("source"))
+            .build()
+            .unwrap();
+        let destination =
+            crate::test_support::local_backend_builder(directory.path().join("destination"))
+                .build()
+                .unwrap();
+        let mut manifest = grouped_archive_manifest(32, None);
+        manifest.root_disk = SnapshotRootDisk::Flat;
+        let image_ref: microsandbox_image::Reference = manifest.image.reference.parse().unwrap();
+        let raw_config_json = "{}".to_string();
+        let metadata = microsandbox_image::CachedImageMetadata {
+            manifest_digest: manifest.image.manifest_digest.clone(),
+            config_digest: format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(raw_config_json.as_bytes()))
+            ),
+            raw_manifest_json: r#"{"schemaVersion":2,"layers":[]}"#.into(),
+            raw_config_json,
+            config: microsandbox_image::ImageConfig::default(),
+            layers: Vec::new(),
+        };
+        let source_cache = microsandbox_image::GlobalCache::new_async(&source.cache_dir())
+            .await
+            .unwrap();
+        source_cache
+            .write_image_metadata_with_provenance_async(
+                &image_ref,
+                &metadata,
+                microsandbox_image::CacheAuthProvenance::Authenticated,
+            )
+            .await
+            .unwrap();
+
+        let artifact = directory.path().join("private-flat-snapshot");
+        write_grouped_archive_fixture(&artifact, &manifest);
+        let archive = directory.path().join("private-flat.msb");
+        save_snapshot(
+            &source,
+            artifact.to_str().unwrap(),
+            &archive,
+            SaveOpts {
+                with_image: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let child_stage = directory.path().join("child-stage");
+        std::fs::create_dir_all(&child_stage).unwrap();
+        let isolated_cache_dir = directory.path().join("orgs/tenant-a/cache");
+        let restored = destination
+            .materialize_archive_for_child(
+                &archive,
+                &crate::context::local::creation::CreationStorage::for_test(&child_stage),
+                false,
+                None,
+                &Default::default(),
+                Default::default(),
+                Some(&isolated_cache_dir),
+            )
+            .await
+            .unwrap();
+        assert!(restored.bundled_image);
+
+        // Bundled image must land only in the isolated cache directory with Unknown provenance.
+        let isolated_cache = microsandbox_image::GlobalCache::new_async(&isolated_cache_dir)
+            .await
+            .unwrap();
+        let installed = isolated_cache
+            .read_image_metadata_async(&image_ref)
+            .await
+            .unwrap()
+            .expect("bundled image metadata installed into isolated cache");
+        assert_eq!(installed.manifest_digest, metadata.manifest_digest);
+        let metadata_bytes = std::fs::read(isolated_cache.image_metadata_path(&image_ref)).unwrap();
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&metadata_bytes)
+                .unwrap()
+                .get("pull_auth")
+                .is_none()
+        );
+
+        let shared_cache = microsandbox_image::GlobalCache::new_async(&destination.cache_dir())
+            .await
+            .unwrap();
+        assert!(
+            shared_cache
+                .read_image_metadata_async(&image_ref)
+                .await
+                .unwrap()
+                .is_none(),
+            "isolated archive materialization must not populate the shared cache"
         );
     }
 
@@ -6854,6 +7372,7 @@ mod tests {
                             .security_profile(microsandbox_types::SecurityProfile::Restricted),
                     ),
                 ),
+                None,
             )
             .await
             .err()
@@ -6886,6 +7405,7 @@ mod tests {
                             .security_profile(microsandbox_types::SecurityProfile::Restricted),
                     ),
                 ),
+                None,
             )
             .await
             .unwrap();

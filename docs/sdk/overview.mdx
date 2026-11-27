@@ -209,6 +209,61 @@ puts sb.status
 Use `MSB_BACKEND` or an active profile to [switch between local and cloud](/cloud/connect#choose-at-startup) across SDKs and the CLI.
 </Tip>
 
+## Capture the configured destination
+
+Resolve configuration once when an application needs to inspect its destination before creating a sandbox, or keep using that destination after `msb context use` changes the saved selection. Resolution uses the same precedence as ordinary SDK calls and returns configuration errors immediately. It does not create a sandbox, open its catalog, or contact the remote API.
+
+<CodeGroup>
+```typescript TypeScript
+import { configuredContext } from "microsandbox";
+
+const destination = configuredContext();
+console.log(destination.info); // kind, source, profile, apiUrl
+const sandboxes = destination.sandboxes;
+```
+
+```rust Rust
+let destination = microsandbox::resolve_context()?;
+println!("{:?}", destination.info()?);
+let sandboxes = destination.sandboxes();
+```
+
+```python Python
+from microsandbox import configured_context
+
+destination = configured_context()
+print(destination.info)  # kind, source, profile, api_url
+sandboxes = destination.sandboxes
+```
+
+```go Go
+import msb "github.com/superradcompany/microsandbox/sdk/go"
+
+destination, err := msb.ConfiguredContext()
+if err != nil {
+    return err
+}
+info, err := destination.Info()
+if err != nil {
+    return err
+}
+fmt.Println(info.Kind, info.Source, info.Profile, info.APIURL)
+sandboxes := destination.Sandboxes()
+```
+
+```ruby Ruby
+require "microsandbox"
+
+destination = Microsandbox.configured_context
+puts destination.info.inspect
+sandboxes = destination.sandboxes
+```
+</CodeGroup>
+
+Use these collections for subsequent operations. They retain the destination's endpoint and authentication even if profiles or environment variables change. Resolving again captures the new configuration; ordinary package-level calls keep their existing selection behavior.
+
+Metadata contains no API key. `kind` is `local` or `remote` (`:local` or `:remote` in Ruby). `source` identifies the selector: `managed`, `MSB_BACKEND`, `MSB_PROFILE`, `active_profile`, or `default`. Explicit constructors can report `programmatic` or `profile`. Rust callers matching `ContextSelectionSource` exhaustively must handle the new `Managed` variant. Profile names and API URLs are absent when not applicable (empty strings in Go). Custom HTTP requests still need their own authentication; this API does not expose credentials or provide an authenticated HTTP client. Go reports an unsupported-operation error from `Info()` when an older native library cannot return retained metadata.
+
 ## Select a smaller distribution
 
 <Note>

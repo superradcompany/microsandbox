@@ -1107,6 +1107,12 @@ async fn run_downgrade_with_db(
         }
 
         if ctx.operation.phase() < DowngradePhase::DatabaseReverted {
+            microsandbox::context::local_snapshot_downgrade::preflight_isolated_image_cache(
+                ctx.db.inner(),
+                ctx.snapshots_dir,
+                ctx.target_version,
+            )
+            .await?;
             if fresh_plan
                 .rollback
                 .iter()
