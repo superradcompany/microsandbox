@@ -1,5 +1,6 @@
 //! Whole-history retirement, with preflight dependency checks and recoverable catalog cleanup.
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::Path;
 
@@ -20,6 +21,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 /// Move every guard into the blocking publisher so cancellation cannot release ownership early.
 struct Prepared {
     retirement: Retirement,
+    sources: BTreeSet<String>,
     report: SnapshotRemoveResult,
     _writer: WriterLease,
     _group: lease::GroupDeletionLease,
@@ -106,9 +108,10 @@ async fn remove_observed(
             source: Box::new(source),
         });
     }
-    super::blocking(move || {
+    let (report, sources) = super::blocking(move || {
         let Prepared {
             retirement,
+            sources,
             mut report,
             _writer,
             _group,
@@ -121,9 +124,15 @@ async fn remove_observed(
             ));
         }
         drop((members, lock, _writer, _group));
-        Ok(report)
+        Ok((report, sources))
     })
-    .await
+    .await?;
+    for source in sources {
+        if let Err(error) = deletion::release_store_objects_after_removal(local, &source).await {
+            tracing::warn!(%error, source, "checkpoint objects of removed group were kept");
+        }
+    }
+    Ok(report)
 }
 
 /// Acquire all publication ownership inside the blocking worker, including during cancellation.
@@ -176,6 +185,10 @@ fn prepare(directory: &Path, writer: WriterLease) -> MicrosandboxResult<Prepared
     };
     let retirement = Retirement::prepare(directory)?;
     Ok(Prepared {
+        sources: selected
+            .values()
+            .filter_map(|member| member.source_lineage.clone())
+            .collect(),
         retirement,
         report,
         _writer: writer,

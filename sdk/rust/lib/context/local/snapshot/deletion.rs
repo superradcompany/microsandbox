@@ -2,17 +2,37 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(windows)]
+use cap_primitives::fs::_WindowsByHandle;
+use cap_primitives::fs::{FollowSymlinks, open_dir_nofollow};
+use cap_std::fs::Dir;
+#[cfg(unix)]
+use cap_std::fs::MetadataExt;
 use microsandbox_image::storage_lease::StorageLease;
+use microsandbox_runtime::ipc::SandboxLifecycleGuard;
 use microsandbox_utils::process_lock;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
 
 use crate::context::LocalContext;
-use crate::db::entity::snapshot;
+use crate::db::entity::{run, sandbox, snapshot};
+use crate::sandbox::validate_sandbox_name;
 use crate::{MicrosandboxError, MicrosandboxResult};
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StoreCleanup {
+    /// Reclaimed, absent, or owned by a runtime whose next stop will request cleanup.
+    Finished,
+    /// A source transition or capture publication still owns the stopped store.
+    Deferred,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -246,6 +266,135 @@ async fn recover_parent_owned(
     Ok(())
 }
 
+/// A removal has no later stop to rely on when its source is already stopped. Keep
+/// contention queued in the shared worker; its individual attempts must not enqueue
+/// themselves, or each retry would also request another complete memory-cache scan.
+pub(super) async fn release_store_objects_after_removal(
+    local: &LocalContext,
+    source: &str,
+) -> MicrosandboxResult<()> {
+    if release_store_objects(local, source).await? == StoreCleanup::Deferred {
+        local.schedule_stopped_storage_cleanup(source);
+    }
+    Ok(())
+}
+
+/// Release unused objects only after excluding both runtime activity and capture publication.
+/// Captures can still be publishing after their VM exits, so the lifecycle lock alone is
+/// insufficient. The existing transition -> lineage -> lifecycle order also fences restarts.
+pub(crate) async fn release_store_objects(
+    local: &LocalContext,
+    source: &str,
+) -> MicrosandboxResult<StoreCleanup> {
+    if validate_sandbox_name(source).is_err() {
+        return Ok(StoreCleanup::Finished);
+    }
+    let db = local.db().await?;
+    // Imported descriptors carry advisory source names. Do not create persistent lock
+    // entries for absent sources, and bind cleanup to this catalog incarnation below.
+    let Some(expected) = sandbox::Entity::find()
+        .filter(sandbox::Column::Name.eq(source))
+        .one(db.read())
+        .await?
+    else {
+        return Ok(StoreCleanup::Finished);
+    };
+    // A restarted runtime can coexist with an older capture still publishing. Do not
+    // keep a stop waiter alive for that capture when the next stop owns reclamation.
+    if has_live_store_owner(local, &expected).await? {
+        return Ok(StoreCleanup::Finished);
+    }
+    let run_dir = local.config().run_dir();
+    let Some(transition) =
+        microsandbox_runtime::ipc::try_acquire_transition_guard(&run_dir, source)?
+    else {
+        // Do not probe lifecycle ownership without transition ownership: taking that
+        // lock even briefly could make an in-progress start mistake us for a runtime.
+        return Ok(StoreCleanup::Deferred);
+    };
+    let lineage = microsandbox_runtime::ipc::try_acquire_snapshot_lineage_guard(&run_dir, source)?;
+    // Probe lifecycle ownership even if capture publication is busy: recorded runtime
+    // status can be stale. No earlier lock is acquired while this guard is held;
+    // incomplete acquisition immediately drops every guard.
+    let Some(lifecycle) = SandboxLifecycleGuard::try_acquire(&run_dir, source)? else {
+        return Ok(StoreCleanup::Finished);
+    };
+    let Some(lineage) = lineage else {
+        return Ok(StoreCleanup::Deferred);
+    };
+    let Some(registered) = sandbox::Entity::find()
+        .filter(sandbox::Column::Name.eq(source))
+        .one(db.read())
+        .await?
+    else {
+        return Ok(StoreCleanup::Finished);
+    };
+    if registered.id != expected.id || has_live_store_owner(local, &registered).await? {
+        return Ok(StoreCleanup::Finished);
+    }
+    let sandboxes = local.sandboxes_dir();
+    let source = source.to_owned();
+    tokio::task::spawn_blocking(move || -> MicrosandboxResult<()> {
+        // Cancellation of the async caller must not release guards during the filesystem scan.
+        let _guards = (transition, lineage, lifecycle);
+        match release_stopped_store(&sandboxes, &source) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result.map_err(Into::into),
+        }
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("checkpoint object release: {error}")))??;
+    Ok(StoreCleanup::Finished)
+}
+
+async fn has_live_store_owner(
+    local: &LocalContext,
+    registered: &sandbox::Model,
+) -> MicrosandboxResult<bool> {
+    if registered.status.has_active_runtime_state() {
+        return Ok(true);
+    }
+    // Older Windows runtimes do not own the modern lifecycle lock. Retain their store
+    // whenever a recorded active process is alive rather than treating a free lock as exit.
+    let active_runs = run::Entity::find()
+        .filter(run::Column::SandboxId.eq(registered.id))
+        .filter(run::Column::Status.eq(run::RunStatus::Running))
+        .all(local.db().await?.read())
+        .await?;
+    Ok(active_runs
+        .iter()
+        .any(|run| run.pid.is_none_or(LocalContext::pid_is_alive)))
+}
+
+/// Every child is opened relative to an admitted directory, without following symlinks or
+/// Windows reparse points. A corrupt store must never redirect cleanup into another host tree.
+fn release_stopped_store(sandboxes: &Path, source: &str) -> io::Result<()> {
+    let mut parent =
+        Dir::open_ambient_dir(sandboxes, cap_std::ambient_authority())?.into_std_file();
+    for name in [source, "checkpoint-store", "objects", "sha256"] {
+        parent = open_dir_nofollow(&parent, Path::new(name))?;
+    }
+    let store = Dir::from_std_file(parent);
+    let shards = store.entries()?;
+    let store = store.into_std_file();
+    for shard in shards {
+        let shard = shard?;
+        if !is_hex(&shard.file_name().to_string_lossy(), 2) || !shard.file_type()?.is_dir() {
+            continue;
+        }
+        let shard = Dir::from_std_file(open_dir_nofollow(&store, Path::new(&shard.file_name()))?);
+        let objects = shard.entries()?;
+        let shard = shard.into_std_file();
+        for object in objects {
+            let object = object?;
+            if is_hex(&object.file_name().to_string_lossy(), 64) {
+                release_unlinked(&shard, Path::new(&object.file_name()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Never erase a receipt skipped because another process still owns its active lock.
 /// Called under the group publication lock after admitted recovery has completed.
 pub(super) fn require_no_pending(parent: &Path) -> MicrosandboxResult<()> {
@@ -336,6 +485,34 @@ pub(crate) fn recovery_parents(local: &LocalContext) -> std::io::Result<BTreeSet
     Ok(parents)
 }
 
+fn release_unlinked(directory: &File, name: &Path) -> io::Result<()> {
+    // Windows directory enumeration does not provide the link count. A no-follow,
+    // handle-relative stat obtains it on both platforms through the existing cap APIs.
+    let metadata = match cap_primitives::fs::stat(directory, name, FollowSymlinks::No) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    #[cfg(unix)]
+    let unlinked = metadata.nlink() == 1;
+    #[cfg(windows)]
+    let unlinked = _WindowsByHandle::number_of_links(&metadata) == Some(1)
+        && _WindowsByHandle::file_attributes(&metadata) & 0x400 == 0;
+    #[cfg(not(any(unix, windows)))]
+    let unlinked = false;
+    if !metadata.is_file() || !unlinked {
+        return Ok(());
+    }
+    match cap_primitives::fs::remove_file(directory, name) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+fn is_hex(name: &str, length: usize) -> bool {
+    name.len() == length && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn coordinate(root: &Path) -> std::io::Result<File> {
     let file = process_lock::open_lock_file(&root.join("coordination.lock"))?;
     process_lock::lock_exclusive(&file)?;
@@ -385,6 +562,196 @@ fn sync_dir(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn store_fixture() -> (
+        tempfile::TempDir,
+        LocalContext,
+        microsandbox_image::checkpoint::LocalObjectStore,
+        i32,
+    ) {
+        use sea_orm::{ActiveModelTrait, Set};
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .unwrap();
+        let model = sandbox::ActiveModel {
+            name: Set("box".into()),
+            config: Set("{}".into()),
+            status: Set(crate::sandbox::SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+        let store = microsandbox_image::checkpoint::LocalObjectStore::open(
+            local.sandboxes_dir().join("box/checkpoint-store"),
+        )
+        .unwrap();
+        (home, local, store, model.id)
+    }
+
+    #[tokio::test]
+    async fn checkpoint_store_skips_absent_sources_without_creating_lock_files() {
+        let (_home, local, _, _) = store_fixture().await;
+        let run_dir = local.config().run_dir();
+        release_store_objects(&local, "absent-source")
+            .await
+            .unwrap();
+        assert!(
+            !microsandbox_runtime::ipc::sandbox_transition_lock_path(&run_dir, "absent-source")
+                .exists()
+        );
+        assert!(
+            !microsandbox_runtime::ipc::snapshot_lineage_lock_path(&run_dir, "absent-source")
+                .exists()
+        );
+        assert!(
+            !microsandbox_runtime::ipc::lifecycle_lock_path(&run_dir, "absent-source").exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_store_reclaims_orphans_and_preserves_snapshots_and_recovery_captures() {
+        let (_home, local, store, _) = store_fixture().await;
+        let orphan = store.object_path(&store.put_bytes(b"orphan").unwrap());
+        let shared = store.object_path(&store.put_bytes(b"snapshot").unwrap());
+        let recovery = store.object_path(&store.put_bytes(b"recovery").unwrap());
+        let snapshot_link = local.sandboxes_dir().join("retained-snapshot-object");
+        std::fs::hard_link(&shared, &snapshot_link).unwrap();
+        let capture = local.sandboxes_dir().join("box/checkpoints/checkpoint_old");
+        std::fs::create_dir_all(&capture).unwrap();
+        let recovery_link = capture.join("recovery-object");
+        std::fs::hard_link(&recovery, &recovery_link).unwrap();
+        let independent_copy = local.sandboxes_dir().join("copied-snapshot-object");
+        std::fs::copy(&orphan, &independent_copy).unwrap();
+        let unknown = orphan.parent().unwrap().join("unrecognized-file");
+        std::fs::write(&unknown, b"retain").unwrap();
+
+        release_store_objects(&local, "box").await.unwrap();
+
+        assert!(!orphan.exists());
+        assert!(shared.exists() && recovery.exists() && unknown.exists());
+        assert_eq!(std::fs::read(recovery_link).unwrap(), b"recovery");
+        assert_eq!(std::fs::read(snapshot_link).unwrap(), b"snapshot");
+        assert_eq!(std::fs::read(independent_copy).unwrap(), b"orphan");
+        // A later pass becomes eligible only once the protected capture link is gone.
+        std::fs::remove_dir_all(capture).unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(!recovery.exists());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_store_defers_for_transition_capture_and_runtime_owners() {
+        let (_home, local, store, _) = store_fixture().await;
+        let orphan = store.object_path(&store.put_bytes(b"orphan").unwrap());
+        let run_dir = local.config().run_dir();
+        let transition = microsandbox_runtime::ipc::try_acquire_transition_guard(&run_dir, "box")
+            .unwrap()
+            .unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(orphan.exists());
+        drop(transition);
+        let capture = super::super::lineage::lock_source(&run_dir, "box")
+            .await
+            .unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(orphan.exists());
+        drop(capture);
+        let runtime = SandboxLifecycleGuard::try_acquire(&run_dir, "box")
+            .unwrap()
+            .unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(orphan.exists());
+        drop(runtime);
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(!orphan.exists());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_store_preserves_a_live_legacy_process_without_a_lifecycle_lock() {
+        use sea_orm::{ActiveModelTrait, Set};
+        let (_home, local, store, id) = store_fixture().await;
+        let orphan = store.object_path(&store.put_bytes(b"orphan").unwrap());
+        let active = run::ActiveModel {
+            sandbox_id: Set(id),
+            pid: Set(Some(std::process::id() as i32)),
+            status: Set(run::RunStatus::Running),
+            ..Default::default()
+        }
+        .insert(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(orphan.exists());
+        run::Entity::delete_by_id(active.id)
+            .exec(local.db().await.unwrap().write())
+            .await
+            .unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert!(!orphan.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkpoint_store_never_follows_symlinked_directories_or_objects() {
+        use std::os::unix::fs::symlink;
+        let (home, local, store, _) = store_fixture().await;
+        let orphan = store.object_path(&store.put_bytes(b"orphan").unwrap());
+        let sandbox = local.sandboxes_dir().join("box");
+        // Move each admitted subtree out, then substitute a symlink. No outside file may be deleted.
+        for relative in [
+            "checkpoint-store/objects/sha256",
+            "checkpoint-store/objects",
+            "checkpoint-store",
+        ] {
+            let path = sandbox.join(relative);
+            let outside = home.path().join("outside");
+            std::fs::rename(&path, &outside).unwrap();
+            symlink(&outside, &path).unwrap();
+            assert!(release_store_objects(&local, "box").await.is_err());
+            assert!(orphan.exists());
+            std::fs::remove_file(&path).unwrap();
+            std::fs::rename(&outside, &path).unwrap();
+        }
+        let outside = home.path().join("outside-object");
+        std::fs::write(&outside, b"outside").unwrap();
+        let alias = orphan.parent().unwrap().join("a".repeat(64));
+        symlink(&outside, &alias).unwrap();
+        release_store_objects(&local, "box").await.unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+        assert!(alias.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(!orphan.exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn checkpoint_store_never_follows_windows_directory_junctions() {
+        let (home, local, store, _) = store_fixture().await;
+        let object = store.object_path(&store.put_bytes(b"outside object").unwrap());
+        let root = local.sandboxes_dir().join("box/checkpoint-store");
+        let outside = home.path().join("outside");
+        std::fs::rename(&root, &outside).unwrap();
+        // Unlike Rust's filesystem APIs, cmd's mklink parses forward slashes as
+        // switches. Use native separators for both generated fixture paths.
+        let created = std::process::Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(root.as_os_str().to_string_lossy().replace('/', "\\"))
+            .arg(outside.as_os_str().to_string_lossy().replace('/', "\\"))
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+
+        assert!(release_store_objects(&local, "box").await.is_err());
+        assert_eq!(std::fs::read(&object).unwrap(), b"outside object");
+        // Remove the junction itself so TempDir cleanup never needs to inspect its target.
+        std::fs::remove_dir(&root).unwrap();
+        std::fs::rename(&outside, &root).unwrap();
+    }
 
     #[tokio::test]
     async fn discovery_never_recovers_a_private_generation_as_a_live_group() {

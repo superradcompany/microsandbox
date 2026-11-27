@@ -14,6 +14,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde::Deserialize;
 use tokio::sync::watch;
 
+use crate::context::local::snapshot::deletion::{StoreCleanup, release_store_objects};
 use crate::db::entity::run;
 use crate::sandbox::SandboxStatus;
 use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
@@ -25,6 +26,7 @@ use super::LocalContext;
 //--------------------------------------------------------------------------------------------------
 
 const BRANCH_STATE_LIMIT: u64 = 16 * 1024 * 1024;
+const STORE_CLEANUP_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 static STOP_MEMORY_SWEEPS: LazyLock<Mutex<HashMap<PathBuf, StopMemorySweep>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -37,8 +39,15 @@ struct StopMemorySweep {
     // The token distinguishes this worker from one registered after it has exited.
     token: Arc<()>,
     pending: bool,
-    targets: Vec<PathBuf>,
+    targets: Vec<StoppedMemoryTarget>,
     finished: watch::Sender<bool>,
+}
+
+#[derive(Clone)]
+struct StoppedMemoryTarget {
+    directory: PathBuf,
+    // The source is selected by completed stop; cleanup rechecks current ownership.
+    context: Option<LocalContext>,
 }
 
 struct StopMemorySweepRegistration {
@@ -57,8 +66,14 @@ struct BranchMemoryReference {
 //--------------------------------------------------------------------------------------------------
 
 impl LocalContext {
-    /// Wait for branch cache cleanup requested by this backend's completed stops.
-    /// CLI callers use this after their stop result, outside the graceful-stop deadline.
+    /// Reuse the per-root stop worker when snapshot removal finds a busy stopped source.
+    /// Sharing its queue preserves coalescing and the CLI's existing cleanup drain.
+    pub(crate) fn schedule_stopped_storage_cleanup(&self, name: &str) {
+        schedule_stopped_memory_sweep(self.clone(), name);
+    }
+
+    /// Wait for cleanup requested by completed stops or deferred snapshot removals.
+    /// CLI callers drain before exit, outside the graceful-stop deadline.
     pub async fn finish_stopped_memory_cleanup(&self) {
         let root = self.cache_dir().join("memory");
         loop {
@@ -355,8 +370,7 @@ impl LocalContext {
                 drop(_disk_guards);
                 drop(_ownership);
                 drop(transition);
-                let memory_root = self.cache_dir().join("memory");
-                schedule_stopped_memory_sweep(memory_root, Some(self.sandboxes_dir().join(name)));
+                schedule_stopped_memory_sweep(self.clone(), name);
                 return Ok(());
             }
             drop(transition);
@@ -440,9 +454,14 @@ fn branch_memory_for_stop(sandbox: &Path, root: &Path) -> Option<LocalMemory> {
     Some(reference.memory)
 }
 
-fn schedule_stopped_memory_sweep(root: PathBuf, target: Option<PathBuf>) {
+fn schedule_stopped_memory_sweep(local: LocalContext, name: &str) {
+    let root = local.cache_dir().join("memory");
+    let target = Some(StoppedMemoryTarget {
+        directory: local.sandboxes_dir().join(name),
+        context: Some(local),
+    });
     let session = Mutex::new(microsandbox_runtime::checkpoint::MemoryPruneSession::default());
-    schedule_stopped_memory_sweep_with(root, target, move |root| {
+    schedule_memory_cleanup(root, target, move |root| {
         let options = microsandbox_runtime::checkpoint::MemoryPruneOptions {
             branches_only: true,
             max_entries: Some(256),
@@ -459,9 +478,25 @@ fn schedule_stopped_memory_sweep(root: PathBuf, target: Option<PathBuf>) {
     });
 }
 
+#[cfg(test)]
 fn schedule_stopped_memory_sweep_with(
     root: PathBuf,
     target: Option<PathBuf>,
+    sweep: impl Fn(&Path) -> bool + Send + Sync + 'static,
+) {
+    schedule_memory_cleanup(
+        root,
+        target.map(|directory| StoppedMemoryTarget {
+            directory,
+            context: None,
+        }),
+        sweep,
+    );
+}
+
+fn schedule_memory_cleanup(
+    root: PathBuf,
+    target: Option<StoppedMemoryTarget>,
     sweep: impl Fn(&Path) -> bool + Send + Sync + 'static,
 ) {
     let token = {
@@ -497,6 +532,8 @@ fn schedule_stopped_memory_sweep_with(
     tokio::spawn(async move {
         // Own the guard before the first poll so runtime shutdown cannot strand this root.
         let _registration = registration;
+        let mut deferred = Vec::<StoppedMemoryTarget>::new();
+        let mut scan_memory = true;
         loop {
             let targets = {
                 let mut sweeps = STOP_MEMORY_SWEEPS
@@ -507,50 +544,90 @@ fn schedule_stopped_memory_sweep_with(
                     .map(|active| std::mem::take(&mut active.targets))
                     .unwrap_or_default()
             };
-            let scan_root = root.clone();
-            let scan = Arc::clone(&sweep);
-            let truncated = match tokio::task::spawn_blocking(move || {
-                for sandbox in targets {
-                    if let Some(memory) = branch_memory_for_stop(&sandbox, &scan_root)
-                        && let Err(error) = memory.evict()
-                    {
-                        tracing::debug!(%error, "targeted stopped sandbox memory cleanup");
+            scan_memory |= !targets.is_empty();
+            for target in &targets {
+                if !deferred
+                    .iter()
+                    .any(|queued| queued.directory == target.directory)
+                {
+                    deferred.push(target.clone());
+                }
+            }
+            let mut retry = Vec::new();
+            for target in deferred {
+                if let Some(local) = &target.context
+                    && let Some(source) =
+                        target.directory.file_name().and_then(|name| name.to_str())
+                {
+                    match release_store_objects(local, source).await {
+                        Ok(StoreCleanup::Deferred) => retry.push(target),
+                        Ok(StoreCleanup::Finished) => {}
+                        Err(error) => {
+                            // Filesystem/catalog errors need operator attention, not an
+                            // endless retry loop that prevents CLI stop from returning.
+                            tracing::warn!(%error, source, "stopped sandbox checkpoint cleanup failed");
+                        }
                     }
                 }
-                scan(&scan_root)
-            })
-            .await
-            {
-                Ok(truncated) => truncated,
-                Err(error) => {
-                    tracing::debug!(%error, "stopped sandbox memory cleanup worker failed");
-                    false
+            }
+            deferred = retry;
+            let scan_root = root.clone();
+            let scan = Arc::clone(&sweep);
+            let truncated = if scan_memory {
+                match tokio::task::spawn_blocking(move || {
+                    for sandbox in targets {
+                        if let Some(memory) = branch_memory_for_stop(&sandbox.directory, &scan_root)
+                            && let Err(error) = memory.evict()
+                        {
+                            tracing::debug!(%error, "targeted stopped sandbox memory cleanup");
+                        }
+                    }
+                    scan(&scan_root)
+                })
+                .await
+                {
+                    Ok(truncated) => truncated,
+                    Err(error) => {
+                        tracing::debug!(%error, "stopped sandbox memory cleanup worker failed");
+                        false
+                    }
                 }
+            } else {
+                false
             };
             // Each filesystem pass remains bounded, but draining the cursor has no
             // 30-second gaps. Keep a stop's pending bit until a full pass ends.
-            let again = {
+            let (again, next_scan) = {
                 let mut sweeps = STOP_MEMORY_SWEEPS
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
                 if truncated {
-                    true
+                    (true, true)
                 } else if let Some(active) = sweeps.get_mut(&root)
                     && active.pending
                 {
                     active.pending = false;
-                    true
+                    (true, true)
+                } else if !deferred.is_empty() {
+                    // Keep capture/transition contention queued without repeatedly
+                    // scanning the RAM cache or spinning while an archive is written.
+                    (true, false)
                 } else {
                     // Remove under the same lock used by new stops. Otherwise a
                     // stop arriving between this check and Drop could be lost.
                     if let Some(active) = sweeps.remove(&root) {
                         active.finished.send_replace(true);
                     }
-                    false
+                    (false, false)
                 }
             };
             if again {
-                tokio::task::yield_now().await;
+                scan_memory = next_scan;
+                if scan_memory {
+                    tokio::task::yield_now().await;
+                } else {
+                    tokio::time::sleep(STORE_CLEANUP_RETRY_INTERVAL).await;
+                }
                 continue;
             }
             // Registration drop is the cancellation fallback.
@@ -576,6 +653,205 @@ mod tests {
     use super::*;
     use crate::db::entity::sandbox;
     use crate::sandbox::SandboxConfig;
+
+    #[tokio::test]
+    async fn completed_stop_retries_checkpoint_store_cleanup_and_preserves_recovery_links() {
+        use microsandbox_image::checkpoint::LocalObjectStore;
+        let (_home, local, id, run_id) = fixture("checkpoint-stop").await;
+        let sandbox = local.sandboxes_dir().join("checkpoint-stop");
+        let store = LocalObjectStore::open(sandbox.join("checkpoint-store")).unwrap();
+        let orphan = store.object_path(&store.put_bytes(b"removed snapshot").unwrap());
+        let recovery = store.object_path(&store.put_bytes(b"recovery").unwrap());
+        let capture = sandbox.join("checkpoints/checkpoint_recovery");
+        std::fs::create_dir_all(&capture).unwrap();
+        std::fs::hard_link(&recovery, capture.join("object")).unwrap();
+        let runtime = try_acquire_lifecycle_guard(&local.config().run_dir(), "checkpoint-stop")
+            .unwrap()
+            .unwrap();
+        crate::context::local::snapshot::deletion::release_store_objects(&local, "checkpoint-stop")
+            .await
+            .unwrap();
+        assert!(orphan.exists());
+        drop(runtime);
+
+        local
+            .wait_stop_complete(
+                "checkpoint-stop",
+                id,
+                Some(run_id),
+                false,
+                #[cfg(windows)]
+                None,
+            )
+            .await
+            .unwrap();
+        local.finish_stopped_memory_cleanup().await;
+
+        assert!(!orphan.exists());
+        assert!(recovery.exists());
+        assert_eq!(std::fs::read(capture.join("object")).unwrap(), b"recovery");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_store_cleanup_retries_contended_locks_without_another_stop() {
+        use microsandbox_image::checkpoint::LocalObjectStore;
+        use microsandbox_runtime::ipc::{
+            try_acquire_snapshot_lineage_guard, try_acquire_transition_guard,
+        };
+
+        for capture in [false, true] {
+            let (_home, local, _, _) = fixture("checkpoint-retry").await;
+            let directory = local.sandboxes_dir().join("checkpoint-retry");
+            let store = LocalObjectStore::open(directory.join("checkpoint-store")).unwrap();
+            let orphan = store.object_path(&store.put_bytes(b"removed snapshot").unwrap());
+            let recovery = store.object_path(&store.put_bytes(b"recovery").unwrap());
+            let retained = directory.join("recovery-object");
+            std::fs::hard_link(&recovery, &retained).unwrap();
+            let run_dir = local.config().run_dir();
+            let owner = if capture {
+                try_acquire_snapshot_lineage_guard(&run_dir, "checkpoint-retry")
+            } else {
+                try_acquire_transition_guard(&run_dir, "checkpoint-retry")
+            }
+            .unwrap()
+            .unwrap();
+            let attempted = Arc::new(Notify::new());
+            let scans = Arc::new(AtomicUsize::new(0));
+            schedule_memory_cleanup(
+                local.cache_dir().join("memory"),
+                Some(StoppedMemoryTarget {
+                    directory,
+                    context: Some(local.clone()),
+                }),
+                {
+                    let attempted = Arc::clone(&attempted);
+                    let scans = Arc::clone(&scans);
+                    move |_| {
+                        scans.fetch_add(1, Ordering::SeqCst);
+                        attempted.notify_one();
+                        false
+                    }
+                },
+            );
+            // The memory scan follows the store attempt, proving that cleanup encountered
+            // the held lock before publication/transition ownership is released.
+            tokio::time::timeout(Duration::from_secs(5), attempted.notified())
+                .await
+                .unwrap();
+            assert!(orphan.exists());
+            tokio::time::sleep(STORE_CLEANUP_RETRY_INTERVAL * 2).await;
+            assert_eq!(scans.load(Ordering::SeqCst), 1, "retry rescanned RAM cache");
+            drop(owner);
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                local.finish_stopped_memory_cleanup(),
+            )
+            .await
+            .unwrap();
+            assert!(!orphan.exists(), "contended cleanup request was discarded");
+            assert!(recovery.exists());
+            assert_eq!(std::fs::read(retained).unwrap(), b"recovery");
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_store_retry_stops_when_runtime_restarts_during_publication() {
+        use microsandbox_image::checkpoint::LocalObjectStore;
+        use microsandbox_runtime::ipc::try_acquire_snapshot_lineage_guard;
+
+        // Exercise each independent owner signal, including a live legacy process
+        // with no lifecycle lock and a current runtime before its status is published.
+        for owner_kind in 0..3 {
+            let (_home, local, id, _) = fixture("checkpoint-retry-restart").await;
+            let directory = local.sandboxes_dir().join("checkpoint-retry-restart");
+            let store = LocalObjectStore::open(directory.join("checkpoint-store")).unwrap();
+            let object = store.object_path(&store.put_bytes(b"runtime baseline").unwrap());
+            let run_dir = local.config().run_dir();
+            let capture = try_acquire_snapshot_lineage_guard(&run_dir, "checkpoint-retry-restart")
+                .unwrap()
+                .unwrap();
+            let attempted = Arc::new(Notify::new());
+            schedule_memory_cleanup(
+                local.cache_dir().join("memory"),
+                Some(StoppedMemoryTarget {
+                    directory,
+                    context: Some(local.clone()),
+                }),
+                {
+                    let attempted = Arc::clone(&attempted);
+                    move |_| {
+                        attempted.notify_one();
+                        false
+                    }
+                },
+            );
+            tokio::time::timeout(Duration::from_secs(5), attempted.notified())
+                .await
+                .unwrap();
+            let runtime = if owner_kind == 0 {
+                Some(
+                    try_acquire_lifecycle_guard(&run_dir, "checkpoint-retry-restart")
+                        .unwrap()
+                        .unwrap(),
+                )
+            } else {
+                if owner_kind == 1 {
+                    LocalContext::update_sandbox_status(
+                        local.db().await.unwrap().write(),
+                        id,
+                        SandboxStatus::Running,
+                    )
+                    .await
+                    .unwrap();
+                } else {
+                    run::Entity::insert(run::ActiveModel {
+                        sandbox_id: Set(id),
+                        pid: Set(Some(std::process::id() as i32)),
+                        status: Set(run::RunStatus::Running),
+                        ..Default::default()
+                    })
+                    .exec(local.db().await.unwrap().write())
+                    .await
+                    .unwrap();
+                }
+                None
+            };
+            // Keep capture ownership held: cleanup must notice the restart before
+            // waiting for publication, and the CLI drain must complete promptly.
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                local.finish_stopped_memory_cleanup(),
+            )
+            .await
+            .unwrap();
+            assert!(object.exists());
+            drop(runtime);
+            drop(capture);
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_checkpoint_store_cleanup_rechecks_a_restarted_runtime() {
+        use microsandbox_image::checkpoint::LocalObjectStore;
+        let (_home, local, _, _) = fixture("checkpoint-restart").await;
+        let store = LocalObjectStore::open(
+            local
+                .sandboxes_dir()
+                .join("checkpoint-restart/checkpoint-store"),
+        )
+        .unwrap();
+        let object = store.object_path(&store.put_bytes(b"new runtime baseline").unwrap());
+        let runtime = try_acquire_lifecycle_guard(&local.config().run_dir(), "checkpoint-restart")
+            .unwrap()
+            .unwrap();
+        schedule_stopped_memory_sweep(local.clone(), "checkpoint-restart");
+        local.finish_stopped_memory_cleanup().await;
+        assert!(object.exists());
+        drop(runtime);
+        schedule_stopped_memory_sweep(local.clone(), "checkpoint-restart");
+        local.finish_stopped_memory_cleanup().await;
+        assert!(!object.exists());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stopped_memory_sweeps_coalesce_without_blocking_other_roots() {

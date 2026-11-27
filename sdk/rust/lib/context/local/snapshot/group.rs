@@ -80,6 +80,7 @@ struct MemberMetadata {
 #[derive(Debug)]
 struct Member {
     path: PathBuf,
+    source_lineage: Option<String>,
     digest: String,
     parent: Option<String>,
     name: Option<String>,
@@ -699,6 +700,7 @@ async fn publish_batch_inner(
                     id.clone(),
                     Member {
                         path: member.path.clone(),
+                        source_lineage: member.source_lineage.clone(),
                         digest: member.digest.clone(),
                         parent: member.parent.clone(),
                         name: None,
@@ -1320,6 +1322,7 @@ fn read_member(path: &Path, installed: bool) -> MicrosandboxResult<(String, Memb
     .map_err(|error| integrity(error.to_string()))?;
     let id = manifest.snapshot_id.to_string();
     let member = Member {
+        source_lineage: manifest.capture.source_lineage.clone(),
         digest: manifest
             .digest()
             .map_err(|error| integrity(error.to_string()))?,
