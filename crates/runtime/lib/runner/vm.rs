@@ -2530,7 +2530,7 @@ fn build_vm(
         let parsed = parse_mount_spec(mount_spec)
             .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
 
-        let tag = parsed.tag;
+        let tag = parsed.tag.clone();
         // Keep the host path as a PathBuf so mount failures can format it
         // without relying on the string-only mount spec field.
         let host_path = PathBuf::from(&parsed.host_path);
@@ -2586,22 +2586,13 @@ fn build_vm(
         }
         let cfg = PassthroughConfig {
             max_state_bytes: vm.fs_state_limit(),
-            root_dir: host_path.clone(),
             external_checkpoint: owned_checkpoint.is_none().then_some(external_options),
             owned_checkpoint,
-            inject_init: false,
-            stat_virtualization: parsed.stat_virtualization,
-            host_permissions: parsed.host_permissions,
-            readonly: parsed.readonly,
-            // Default-on protection: resolve the mount root following no symlink
-            // unless the mount opted out via `follow-root-symlinks`.
-            no_symlink_root: !parsed.follow_root_symlinks,
             #[cfg(unix)]
             bind_identity_map: mount_bind_identity_map,
             #[cfg(windows)]
             default_owner: override_owner,
-            quota_bytes: parsed.quota_bytes,
-            ..Default::default()
+            ..host_directory_mount_config(&parsed)
         };
         let backend = match PassthroughFs::new(cfg) {
             Err(error) if owned_mount.is_none() && relaxed && restore_binding.is_some_and(|binding| !binding.require_backing)
@@ -3362,6 +3353,36 @@ fn bind_rootfs_backend(
         ..Default::default()
     };
     PassthroughFs::new(cfg).map_err(|e| RuntimeError::Custom(format!("rootfs: {e}")))
+}
+
+/// The passthrough settings a host directory mount (`--mount`: a bind mount,
+/// a named directory volume or an owned directory volume) takes from its
+/// mount spec. `build_vm` adds the VM-wide state.
+///
+/// The host can change a mounted directory while the guest runs, for example
+/// an editor saving a file by writing a temporary file and renaming it over
+/// the original. The guest kernel caches each entry and its attributes for
+/// the timeout the FUSE reply carries, so with a non-zero timeout the guest
+/// keeps resolving the name to the replaced inode and keeps reporting its old
+/// size. Both timeouts are zero, as for single-file mounts. Unlike single-file
+/// mounts, this does not negotiate `AUTO_INVAL_DATA`, so a same-size in-place
+/// write to a file the guest already has open can still be served from its
+/// page cache.
+fn host_directory_mount_config(parsed: &ParsedMountSpec) -> PassthroughConfig {
+    PassthroughConfig {
+        root_dir: PathBuf::from(&parsed.host_path),
+        inject_init: false,
+        stat_virtualization: parsed.stat_virtualization,
+        host_permissions: parsed.host_permissions,
+        readonly: parsed.readonly,
+        // Default-on protection: resolve the mount root following no symlink
+        // unless the mount opted out via `follow-root-symlinks`.
+        no_symlink_root: !parsed.follow_root_symlinks,
+        quota_bytes: parsed.quota_bytes,
+        entry_timeout: Duration::ZERO,
+        attr_timeout: Duration::ZERO,
+        ..Default::default()
+    }
 }
 
 /// Canonicalize a microsandbox-owned mount root so it is symlink-free.
@@ -4191,9 +4212,10 @@ mod tests {
         AGENT_BULK_QUEUE_SIZE, AGENT_CONTROL_QUEUE_SIZE, AgentTransportProfile, ConsoleSharedState,
         HostPermissions, StatVirtualization, agent_kernel_cmdline, agent_primary_queue_size,
         append_block_root_env, bind_rootfs_backend, encode_bootstrap_frame,
-        guest_shutdown_flush_timeout, guest_shutdown_flush_timeout_with_override, parse_mount_spec,
-        prepend_scripts_path, request_guest_shutdown, request_guest_shutdown_with_timeout,
-        thp_kernel_cmdline, validate_disk_format,
+        guest_shutdown_flush_timeout, guest_shutdown_flush_timeout_with_override,
+        host_directory_mount_config, parse_mount_spec, prepend_scripts_path,
+        request_guest_shutdown, request_guest_shutdown_with_timeout, thp_kernel_cmdline,
+        validate_disk_format,
     };
     #[cfg(unix)]
     use super::{
@@ -4207,7 +4229,7 @@ mod tests {
         recover_owned_disk_layers, validate_disk_mount_layers, validate_upper_layers,
     };
 
-    use microsandbox_filesystem::{Context, DynFileSystem, FsOptions};
+    use microsandbox_filesystem::{Context, DynFileSystem, FsOptions, PassthroughFs};
     use microsandbox_protocol::{bootstrap::GuestBootstrap, codec, message::MessageType};
     #[cfg(unix)]
     use std::io::Write;
@@ -4545,6 +4567,50 @@ mod tests {
 
         assert_ne!(host.inode, init.inode);
         assert_eq!(init.inode, 2);
+    }
+
+    // The guest kernel caches an entry and its attributes for the timeout
+    // each FUSE reply carries. A host directory mount must reply with zero,
+    // so after the host replaces a file by rename the guest's next lookup
+    // reaches the new file instead of a cached, replaced inode.
+    //
+    // The backend is built from a parsed mount spec through
+    // `host_directory_mount_config`, the function `build_vm` takes every
+    // spec-derived setting from. `build_vm` itself cannot be observed here:
+    // it moves the backend into the libkrun VM builder, which exposes no way
+    // to read it back.
+    #[test]
+    fn test_host_directory_mount_replies_expire_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.txt");
+        let replacement = dir.path().join("config.txt.tmp");
+        std::fs::write(&file, b"old").unwrap();
+
+        // The tempdir path may traverse a symlinked prefix (macOS `/var`).
+        let spec = format!("data:{}:follow-root-symlinks", dir.path().display());
+        let parsed = parse_mount_spec(&spec).unwrap();
+        let fs = PassthroughFs::new(host_directory_mount_config(&parsed)).unwrap();
+        fs.init(FsOptions::empty()).unwrap();
+
+        let original = fs.lookup(fs_context(), 1, c"config.txt").unwrap();
+        assert_eq!(original.attr.st_size, 3);
+        assert_eq!(original.entry_timeout, Duration::ZERO);
+        assert_eq!(original.attr_timeout, Duration::ZERO);
+        let (_, attr_timeout) = fs.getattr(fs_context(), original.inode, None).unwrap();
+        assert_eq!(attr_timeout, Duration::ZERO);
+
+        // An atomic save: write a temporary file and rename it over the original.
+        std::fs::write(&replacement, b"new contents").unwrap();
+        std::fs::rename(&replacement, &file).unwrap();
+
+        let entry = fs.lookup(fs_context(), 1, c"config.txt").unwrap();
+        assert_eq!(entry.attr.st_size as u64, b"new contents".len() as u64);
+        assert_eq!(entry.entry_timeout, Duration::ZERO);
+        assert_eq!(entry.attr_timeout, Duration::ZERO);
+        // On Windows a name the host replaced keeps its old inode; changing
+        // that is a separate fix in the Windows backend.
+        #[cfg(unix)]
+        assert_ne!(entry.inode, original.inode);
     }
 
     #[cfg(unix)]

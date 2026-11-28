@@ -613,13 +613,15 @@ jobs:
           # tests. The `Check msb` step above stays library and binary only.
           cargo +stable clippy --no-default-features --features net,ssh,keyring -p microsandbox-cli --target ${{ matrix.rust_target }} --all-targets -- -D warnings
 
-      - name: Test bind rootfs backend
+      - name: Test passthrough backends (rootfs, directory mount)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test --no-default-features --features net,runner -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} test_bind_rootfs_backend_exposes_host_file_and_init
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +stable test --no-default-features --features net,runner -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} test_host_directory_mount_replies_expire_at_once
 
       - name: Test bind rootfs patches
         shell: pwsh
