@@ -1,5 +1,7 @@
 //! Removal and rename operations for the Windows passthrough backend.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::os::windows::io::AsRawHandle;
 
 use windows_sys::Win32::Foundation::{
@@ -8,7 +10,8 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
     FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_READ_ATTRIBUTES,
-    FILE_RENAME_INFO, FileDispositionInfoEx, FileRenameInfoEx, SetFileInformationByHandle,
+    FILE_RENAME_INFO, FILE_WRITE_ATTRIBUTES, FileDispositionInfoEx, FileRenameInfoEx,
+    SetFileInformationByHandle,
 };
 
 use super::*;
@@ -19,6 +22,20 @@ use super::*;
 
 const FILE_RENAME_REPLACE_IF_EXISTS: u32 = 0x1;
 const FILE_RENAME_POSIX_SEMANTICS: u32 = 0x2;
+
+#[cfg(test)]
+thread_local! {
+    /// Runs on the unlinking thread after the host deletion and before the
+    /// inode table follows it, so a test can act inside that window.
+    pub(super) static AFTER_HOST_UNLINK: RefCell<Option<Box<dyn FnOnce()>>> =
+        const { RefCell::new(None) };
+
+    /// Runs on the unlinking thread after a pin found that the name still
+    /// holds the inode's file and before it pins the file's metadata stream,
+    /// so a test can replace the name inside that window.
+    pub(super) static AFTER_PIN_CHECK: RefCell<Option<Box<dyn FnOnce()>>> =
+        const { RefCell::new(None) };
+}
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -87,10 +104,10 @@ impl PassthroughFs {
                 }
             }
 
+            after_host_unlink();
             // Commit namespace bookkeeping before remapping: a remap error
             // cannot undo a successful host deletion.
-            self.retain_owned_unlink(retained);
-            self.remove_inode_path(path);
+            self.finish_unlink_path(path, retained);
             if let Some(store) = &self.stat_store {
                 store.remove(path)?;
             }
@@ -106,8 +123,7 @@ impl PassthroughFs {
             None
         };
         let finish = || {
-            self.retain_owned_unlink(retained);
-            self.rename_inode_path(old_path, new_path);
+            self.rename_inode_path(old_path, new_path, retained);
             if let Some(store) = &self.stat_store {
                 store.rename(old_path, new_path)?;
             }
@@ -171,67 +187,183 @@ impl PassthroughFs {
         Ok(())
     }
 
+    /// Pin a file about to lose its name. Owned mounts pin every tracked file;
+    /// other mounts pin only files the guest still has open, so that fstat,
+    /// read and write keep working on the old object as POSIX requires.
     pub(super) fn prepare_owned_unlink(
         &self,
         path: &Path,
     ) -> io::Result<Option<PreparedOwnedUnlink>> {
-        if self.cfg.owned_checkpoint.is_none() {
-            return Ok(None);
-        }
         let data = self.inodes.read().unwrap().by_path.get(path).cloned();
         let Some(data) = data else {
             return Ok(None);
         };
+        if self.cfg.owned_checkpoint.is_none() {
+            if !self.has_open_handle(data.inode) {
+                return Ok(None);
+            }
+            // The pin is best effort here: if any step fails, the unlink goes
+            // ahead without it, and finish_removed_alias falls back to
+            // retain_open_file, which pins a clone of the guest's own handle.
+            return Ok(self.pin_open_file(path, data));
+        }
         let metadata = self.safe_metadata(path)?;
         if !metadata.is_file() {
             return Ok(None);
         }
-        let current = self.current_override(&metadata, &data)?;
+        // Read the guest metadata now: an ADS override moves with whichever
+        // file holds the name, so after a rename-over it is the new file's.
+        // Read it at this name, which the check below confirms still holds
+        // the inode's file, not at the inode's path, another hard link.
+        let current = self.current_override_at(&metadata, &data, path)?;
         let file = StdOpenOptions::new()
             .read(true)
             .write(!metadata.permissions().readonly())
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
             .map_err(host_error)?;
-        reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
-        let stat_file = self.pin_owned_stat(path, current)?;
-        Ok(Some(PreparedOwnedUnlink {
-            data,
-            file,
-            stat: current,
-            stat_file,
-        }))
-    }
+        let file_metadata = file.metadata().map_err(host_error)?;
+        reject_reparse_metadata(&file_metadata)?;
+        if !Self::holds_own_object(&data, &file) {
+            return Ok(None);
+        }
 
-    pub(super) fn retain_owned_unlink(&self, prepared: Option<PreparedOwnedUnlink>) {
-        if let Some(PreparedOwnedUnlink {
+        after_pin_check();
+        // A metadata stream pinned through the checked handle is the file's
+        // own, so its contents replace what was read by path above.
+        let (stat_file, stat) =
+            match self.pin_owned_stat(&file, self.default_override(&file_metadata))? {
+                Some((stat_file, stat)) => (Some(stat_file), stat),
+                None => (None, current),
+            };
+        Ok(Some(PreparedOwnedUnlink {
             data,
             file,
             stat,
             stat_file,
-        }) = prepared
-        {
-            *data.virtual_meta.write().unwrap() = inode::VirtualMetadata {
-                uid: stat.uid,
-                gid: stat.gid,
-                mode: Some(stat.mode),
-                rdev: u64::from(stat.rdev),
-            };
-            *data.retained.lock().unwrap() = Some(file);
-            *data.retained_stat.lock().unwrap() = stat_file;
+        }))
+    }
+
+    /// Pin a file the guest has open on a mount without an owned checkpoint.
+    /// Attribute access is enough for fstat; write access keeps a guest
+    /// chmod/utimes on the open file working. Without write access there is
+    /// no pin here, and the fallback pins a clone of the guest's own handle.
+    fn pin_open_file(&self, path: &Path, data: Arc<InodeData>) -> Option<PreparedOwnedUnlink> {
+        let metadata = self.safe_metadata(path).ok()?;
+        if !metadata.is_file() {
+            return None;
         }
+        // Read the guest metadata now: an ADS override moves with whichever
+        // file holds the name, so after a rename-over it is the new file's.
+        // Read it at this name, which the check below confirms still holds
+        // the inode's file, not at the inode's path, another hard link.
+        let current = self.current_override_at(&metadata, &data, path).ok()?;
+        // Keep it in memory as well: if a step below fails, the fallback pin
+        // after the host operation can no longer read the stream by path.
+        // Only while the name still holds this file: once the host replaced
+        // it, the stream read is the replacing file's.
+        if self.stat_follows_file() {
+            let replaced = data
+                .identity
+                .is_some_and(|identity| self.path_identity(path).ok().flatten() != Some(identity));
+            if replaced {
+                return None;
+            }
+            keep_in_memory(&data, current);
+        }
+        let file = StdOpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .ok()?;
+        let file_metadata = file.metadata().ok()?;
+        reject_reparse_metadata(&file_metadata).ok()?;
+        if !Self::holds_own_object(&data, &file) {
+            return None;
+        }
+
+        after_pin_check();
+        // Pin the file's own metadata stream too, so that a chmod or chown
+        // made while the file has no name is stored with the file, where a
+        // lookup of another hard link reads it. Without it the change stays
+        // in memory only. A stream pinned through the checked handle is the
+        // file's own, so its contents replace what was read by path above.
+        let (stat_file, stat) =
+            match self.pin_owned_stat(&file, self.default_override(&file_metadata)) {
+                Ok(Some((stat_file, stat))) => (Some(stat_file), stat),
+                _ => (None, current),
+            };
+        Some(PreparedOwnedUnlink {
+            data,
+            file,
+            stat,
+            stat_file,
+        })
+    }
+
+    /// The host may have replaced the object at the inode's name since the
+    /// guest looked it up: pinning that one would give the inode another file.
+    fn holds_own_object(data: &InodeData, file: &File) -> bool {
+        data.identity
+            .is_none_or(|identity| mobility::file_identity(file).ok() == Some(identity))
+    }
+
+    /// Called with the inode table locked, by the table update that drops
+    /// the name: a lookup between the two would see a retained inode that
+    /// still has its name, finish it as replaced by the host and keep it
+    /// (retained), and the update would then never reap it.
+    fn retain_owned_unlink(&self, prepared: Option<PreparedOwnedUnlink>) -> Option<Arc<InodeData>> {
+        let PreparedOwnedUnlink {
+            data,
+            file,
+            stat,
+            stat_file,
+        } = prepared?;
+        keep_in_memory(&data, stat);
+        *data.retained.lock().unwrap() = Some(file);
+        *data.retained_stat.lock().unwrap() = stat_file;
+        Some(data)
     }
 
     pub(super) fn remove_inode_path(&self, path: &Path) {
+        self.finish_unlink_path(path, None);
+    }
+
+    /// Drop the name of a guest unlink, retaining the prepared inode under
+    /// the same table lock.
+    fn finish_unlink_path(&self, path: &Path, retained: Option<PreparedOwnedUnlink>) {
         let mut inodes = self.inodes.write().unwrap();
-        if let Some(data) = inodes.by_path.remove(path) {
-            self.finish_removed_alias(&mut inodes, &data);
-            drop(inodes);
-            self.reap_owned_inode(data.inode);
+        let pinned = self.retain_owned_unlink(retained);
+        let removed = inodes.by_path.remove(path);
+        if let Some(data) = &removed {
+            self.finish_removed_alias(&mut inodes, data);
+        }
+        Self::unpin_if_named(&inodes, pinned);
+        drop(inodes);
+        if let Some(data) = removed {
+            self.reap_retained_inode(data.inode);
         }
     }
 
-    fn finish_removed_alias(&self, inodes: &mut InodeTable, data: &Arc<InodeData>) {
+    /// A lookup inside the window can give the prepared inode another name
+    /// (a hard link elsewhere) before the update runs: it is then not removed
+    /// by it, and keeps its name, so it must not stay retained.
+    fn unpin_if_named(inodes: &InodeTable, pinned: Option<Arc<InodeData>>) {
+        let Some(data) = pinned else {
+            return;
+        };
+        if let Some(path) = inodes
+            .by_path
+            .iter()
+            .find_map(|(path, alias)| Arc::ptr_eq(alias, &data).then(|| path.clone()))
+        {
+            *data.path.write().unwrap() = path;
+            *data.retained.lock().unwrap() = None;
+            *data.retained_stat.lock().unwrap() = None;
+        }
+    }
+
+    pub(super) fn finish_removed_alias(&self, inodes: &mut InodeTable, data: &Arc<InodeData>) {
         if let Some(path) = inodes
             .by_path
             .iter()
@@ -240,7 +372,7 @@ impl PassthroughFs {
             *data.path.write().unwrap() = path;
             *data.retained.lock().unwrap() = None;
             *data.retained_stat.lock().unwrap() = None;
-        } else if data.retained.lock().unwrap().is_none() {
+        } else if data.retained.lock().unwrap().is_none() && !self.retain_open_file(data) {
             inodes.by_inode.remove(&data.inode);
             if let Some(identity) = data.identity
                 && inodes
@@ -262,11 +394,77 @@ impl PassthroughFs {
         }
     }
 
-    pub(super) fn rename_inode_path(&self, old_path: &Path, new_path: &Path) {
+    /// Fallback when prepare_owned_unlink pinned nothing (its best-effort pin
+    /// failed, or the handle was opened after it looked): keep the removed
+    /// file reachable through the guest's handle. Called before the path's
+    /// stat store entry is moved or removed.
+    pub(super) fn retain_open_file(&self, data: &InodeData) -> bool {
+        let file = self
+            .handles
+            .read()
+            .unwrap()
+            .values()
+            .find(|handle| handle.inode == data.inode)
+            .and_then(|handle| handle.file.lock().unwrap().try_clone().ok());
+        let Some(file) = file else {
+            return false;
+        };
+        // A handle opened by path after the host rename holds the replacing
+        // file; pinning it would alias the old inode to the new object.
+        if data
+            .identity
+            .is_some_and(|identity| mobility::file_identity(&file).ok() != Some(identity))
+        {
+            return false;
+        }
+        let Ok(metadata) = file.metadata() else {
+            return false;
+        };
+        if metadata.is_dir() {
+            return false;
+        }
+        // The override is read by path after the host operation. A sidecar
+        // entry there is still this file's: the store moves or removes it
+        // only afterwards, and the host never touches it. A metadata stream
+        // belongs to whatever holds the name now: the replacing file after a
+        // rename-over or a host replace, nothing after an unlink. So a stream
+        // is read only while the name still holds this file; otherwise the
+        // inode keeps its in-memory metadata, which pin_open_file filled in
+        // before a guest unlink or rename. If the override cannot be read,
+        // the inode keeps its in-memory metadata too, and the file stays
+        // pinned.
+        let by_path = !self.stat_follows_file()
+            || data.identity.is_some_and(|identity| {
+                self.path_identity(&data.path()).ok().flatten() == Some(identity)
+            });
+        if by_path && let Ok(stat) = self.current_override(&metadata, data) {
+            keep_in_memory(data, stat);
+        }
+        *data.retained.lock().unwrap() = Some(file);
+        true
+    }
+
+    /// Whether guest metadata is kept in a stream of each file, which follows
+    /// the file object, rather than under its path.
+    pub(super) fn stat_follows_file(&self) -> bool {
+        self.stat_store
+            .as_ref()
+            .is_some_and(StatStore::follows_file)
+    }
+
+    pub(super) fn rename_inode_path(
+        &self,
+        old_path: &Path,
+        new_path: &Path,
+        retained: Option<PreparedOwnedUnlink>,
+    ) {
         if old_path == new_path {
+            // rename_file prepares nothing for a rename onto itself.
+            debug_assert!(retained.is_none());
             return;
         }
         let mut inodes = self.inodes.write().unwrap();
+        let pinned = self.retain_owned_unlink(retained);
         let replaced = inodes.by_path.remove(new_path);
         let moved = inodes
             .by_path
@@ -298,9 +496,45 @@ impl PassthroughFs {
         if let Some(replaced) = &replaced {
             self.finish_removed_alias(&mut inodes, replaced);
         }
+        Self::unpin_if_named(&inodes, pinned);
         drop(inodes);
         if let Some(replaced) = replaced {
-            self.reap_owned_inode(replaced.inode);
+            self.reap_retained_inode(replaced.inode);
         }
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Hold `stat` as the inode's metadata, which it reports once no name of its
+/// file can be read.
+fn keep_in_memory(data: &InodeData, stat: OverrideStat) {
+    *data.virtual_meta.write().unwrap() = inode::VirtualMetadata {
+        uid: stat.uid,
+        gid: stat.gid,
+        mode: Some(stat.mode),
+        rdev: u64::from(stat.rdev),
+    };
+}
+
+#[cfg(test)]
+fn after_host_unlink() {
+    if let Some(hook) = AFTER_HOST_UNLINK.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+fn after_host_unlink() {}
+
+#[cfg(test)]
+fn after_pin_check() {
+    if let Some(hook) = AFTER_PIN_CHECK.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+fn after_pin_check() {}

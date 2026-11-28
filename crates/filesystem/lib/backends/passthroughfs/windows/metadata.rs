@@ -84,23 +84,30 @@ impl PassthroughFs {
         metadata: &std::fs::Metadata,
         data: &InodeData,
     ) -> io::Result<OverrideStat> {
+        self.current_override_at(metadata, data, &data.path())
+    }
+
+    /// Like `current_override`, but reads a stored entry at `path`, one of
+    /// the inode's names, rather than at the inode's own path: that can be
+    /// another hard link, which the host may have replaced since.
+    pub(super) fn current_override_at(
+        &self,
+        metadata: &std::fs::Metadata,
+        data: &InodeData,
+        path: &Path,
+    ) -> io::Result<OverrideStat> {
         if let Some(stat) = owned_metadata::read_retained_stat(data)? {
             return Ok(stat);
         }
         if let Some(store) = &self.stat_store
             && data.retained.lock().unwrap().is_none()
-            && let Some(override_stat) = store.read(&data.path())?
+            && let Some(override_stat) = store.read(path)?
         {
             return Ok(override_stat);
         }
 
         if self.stat_store.is_some() && data.retained.lock().unwrap().is_none() {
-            // No stored entry yet: a host-created file. Seed the mutation
-            // baseline with the configured default owner (falling back to 0:0)
-            // so a later setattr persists that owner instead of resetting it to
-            // root — matching the read path in `stat_from_metadata`.
-            let (uid, gid) = self.cfg.default_owner.unwrap_or((0, 0));
-            return Ok(OverrideStat::new(uid, gid, mode_from_metadata(metadata), 0));
+            return Ok(self.default_override(metadata));
         }
 
         let virtual_meta = data.virtual_meta.read().unwrap();
@@ -120,6 +127,15 @@ impl PassthroughFs {
                 .unwrap_or_else(|| mode_from_metadata(metadata)),
             rdev: virtual_meta.rdev.try_into().unwrap_or(u32::MAX),
         })
+    }
+
+    /// The metadata of a file with no stored entry yet: a host-created file.
+    /// It seeds the mutation baseline with the configured default owner
+    /// (falling back to 0:0), so a later setattr persists that owner instead
+    /// of resetting it to root, matching the read path in `stat_from_metadata`.
+    pub(super) fn default_override(&self, metadata: &std::fs::Metadata) -> OverrideStat {
+        let (uid, gid) = self.cfg.default_owner.unwrap_or((0, 0));
+        OverrideStat::new(uid, gid, mode_from_metadata(metadata), 0)
     }
 
     pub(super) fn set_virtual_metadata(
@@ -173,13 +189,22 @@ impl PassthroughFs {
         Ok(())
     }
 
-    pub(super) fn do_getattr(&self, inode: u64) -> io::Result<(stat64, Duration)> {
+    pub(super) fn do_getattr(
+        &self,
+        inode: u64,
+        handle: Option<u64>,
+    ) -> io::Result<(stat64, Duration)> {
         if self.cfg.inject_init && inode == INIT_INODE {
             return Ok((init_stat(), self.cfg.attr_timeout));
         }
 
         let data = self.inode(inode)?;
-        let metadata = self.inode_metadata(&data)?;
+        // An open handle names the object itself, even while its path is being
+        // replaced and before the inode bookkeeping catches up.
+        let metadata = match handle.map(|handle| self.handle(inode, handle)) {
+            Some(Ok(handle)) => handle.file.lock().unwrap().metadata().map_err(host_error)?,
+            _ => self.inode_metadata(&data)?,
+        };
         Ok((
             self.stat_from_metadata(&metadata, data.as_ref())?,
             self.cfg.attr_timeout,
@@ -306,6 +331,6 @@ impl PassthroughFs {
             }
         }
 
-        self.do_getattr(inode)
+        self.do_getattr(inode, handle)
     }
 }

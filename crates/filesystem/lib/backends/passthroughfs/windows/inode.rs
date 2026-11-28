@@ -20,7 +20,8 @@ pub(super) struct InodeData {
     pub(super) path: RwLock<PathBuf>,
     pub(super) identity: Option<(u32, u64)>,
     pub(super) virtual_meta: RwLock<VirtualMetadata>,
-    /// Owned-only pin after the tracked namespace link disappears.
+    /// Pin of a file whose name is gone while the guest can still reach it:
+    /// every tracked file on owned mounts, open files on the others.
     pub(super) retained: Mutex<Option<File>>,
     /// A pinned ADS preserves shared guest metadata even after namespace unlink.
     pub(super) retained_stat: Mutex<Option<File>>,
@@ -109,11 +110,20 @@ impl PassthroughFs {
                     Some(current.saturating_sub(count))
                 });
         }
-        self.reap_owned_inode(inode);
+        self.reap_retained_inode(inode);
     }
 
-    pub(super) fn reap_owned_inode(&self, inode: u64) {
-        if self.cfg.owned_checkpoint.is_none() || inode <= INIT_INODE {
+    /// Drop a retained (unlinked) inode once nothing in the guest can reach it.
+    pub(super) fn reap_retained_inode(&self, inode: u64) {
+        if inode <= INIT_INODE
+            || !self
+                .inodes
+                .read()
+                .unwrap()
+                .by_inode
+                .get(&inode)
+                .is_some_and(|data| data.retained.lock().unwrap().is_some())
+        {
             return;
         }
         // Directory enumeration holds its snapshot lock while interning names. Do not
@@ -134,12 +144,7 @@ impl PassthroughFs {
         };
         if data.retained.lock().unwrap().is_none()
             || data.lookups.load(Ordering::Acquire) != 0
-            || self
-                .handles
-                .read()
-                .unwrap()
-                .values()
-                .any(|handle| handle.inode == inode)
+            || self.has_open_handle(inode)
         {
             return;
         }
@@ -176,6 +181,9 @@ impl PassthroughFs {
         self.entry_from_metadata(&metadata, data.as_ref())
     }
 
+    /// An inode that is no longer tracked lost its name after the guest looked
+    /// it up (open files are retained). ESTALE, unlike EBADF, makes the guest
+    /// kernel redo path-based calls such as open and stat with a fresh lookup.
     pub(super) fn inode(&self, inode: u64) -> io::Result<Arc<InodeData>> {
         self.inodes
             .read()
@@ -183,7 +191,7 @@ impl PassthroughFs {
             .by_inode
             .get(&inode)
             .cloned()
-            .ok_or_else(|| linux_error(LINUX_EBADF))
+            .ok_or_else(|| linux_error(LINUX_ESTALE))
     }
 
     pub(super) fn intern_path(&self, path: PathBuf) -> io::Result<Arc<InodeData>> {
@@ -336,6 +344,35 @@ impl PassthroughFs {
 
         let path = self.child_path(parent, name)?;
         self.entry_for_path(path)
+    }
+
+    /// Register an open file. An inode removed while it was being opened is
+    /// stale: the guest kernel retries the open with a fresh lookup.
+    pub(super) fn insert_handle(&self, inode: u64, flags: u32, file: File) -> io::Result<u64> {
+        // Hold the inode table so a concurrent unlink or rename-over either sees
+        // this handle and retains the inode, or has already dropped it.
+        let inodes = self.inodes.read().unwrap();
+        if !inodes.by_inode.contains_key(&inode) {
+            return Err(linux_error(LINUX_ESTALE));
+        }
+        let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        self.handles.write().unwrap().insert(
+            handle,
+            Arc::new(HandleData {
+                inode,
+                flags,
+                file: Mutex::new(file),
+            }),
+        );
+        Ok(handle)
+    }
+
+    pub(super) fn has_open_handle(&self, inode: u64) -> bool {
+        self.handles
+            .read()
+            .unwrap()
+            .values()
+            .any(|handle| handle.inode == inode)
     }
 
     pub(super) fn handle(&self, inode: u64, handle: u64) -> io::Result<Arc<HandleData>> {

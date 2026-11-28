@@ -49,15 +49,7 @@ impl PassthroughFs {
             return Err(error);
         }
 
-        let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
-        self.handles.write().unwrap().insert(
-            handle,
-            Arc::new(HandleData {
-                inode: data.inode,
-                flags,
-                file: Mutex::new(file),
-            }),
-        );
+        let handle = self.insert_handle(data.inode, flags, file)?;
 
         Ok((
             self.entry_from_metadata(&metadata, data.as_ref())?,

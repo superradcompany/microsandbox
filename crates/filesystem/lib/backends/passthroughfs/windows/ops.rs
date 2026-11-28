@@ -61,9 +61,9 @@ impl DynFileSystem for PassthroughFs {
         &self,
         _ctx: Context,
         inode: u64,
-        _handle: Option<u64>,
+        handle: Option<u64>,
     ) -> io::Result<(stat64, Duration)> {
-        self.do_getattr(inode)
+        self.do_getattr(inode, handle)
     }
 
     fn setattr(
@@ -377,7 +377,7 @@ impl DynFileSystem for PassthroughFs {
         };
         drop(handles);
         if result.is_ok() {
-            self.reap_owned_inode(inode);
+            self.reap_retained_inode(inode);
         }
         result
     }
@@ -558,29 +558,27 @@ impl DynFileSystem for PassthroughFs {
 
     fn releasedir(&self, _ctx: Context, inode: u64, _flags: u32, handle: u64) -> io::Result<()> {
         let mut handles = self.dir_handles.write().unwrap();
-        let result = match handles.remove(&handle) {
-            Some(data) if data.inode == inode => Ok(()),
+        let released = match handles.remove(&handle) {
+            Some(data) if data.inode == inode => data,
             Some(data) => {
                 handles.insert(handle, data);
-                Err(linux_error(LINUX_EBADF))
+                return Err(linux_error(LINUX_EBADF));
             }
-            None => Err(linux_error(LINUX_EBADF)),
+            None => return Err(linux_error(LINUX_EBADF)),
         };
         drop(handles);
-        if result.is_ok() && self.cfg.owned_checkpoint.is_some() {
-            let ids = self
-                .inodes
-                .read()
-                .unwrap()
-                .by_inode
-                .keys()
-                .copied()
-                .collect::<Vec<_>>();
-            for id in ids {
-                self.reap_owned_inode(id);
-            }
+        // Only inodes listed in this snapshot can have been kept by it.
+        let ids = released
+            .snapshot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|entries| entries.iter().map(|entry| entry.inode).collect::<Vec<_>>())
+            .unwrap_or_default();
+        for id in ids {
+            self.reap_retained_inode(id);
         }
-        result
+        Ok(())
     }
 
     fn access(&self, _ctx: Context, inode: u64, mask: u32) -> io::Result<()> {
@@ -592,7 +590,7 @@ impl DynFileSystem for PassthroughFs {
         }
 
         let data = self.inode(inode)?;
-        let metadata = self.safe_metadata(&data.path())?;
+        let metadata = self.inode_metadata(&data)?;
         let st = self.stat_from_metadata(&metadata, data.as_ref())?;
         check_access(_ctx, &st, mask)
     }

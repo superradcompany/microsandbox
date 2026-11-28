@@ -227,8 +227,12 @@ pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedSt
             );
         }
         let [uid, gid, mode, rdev] = detached.guest;
-        let stat_file =
-            fs.pin_owned_stat(&path, super::super::OverrideStat::new(uid, gid, mode, rdev))?;
+        let stat_file = fs
+            .pin_owned_stat(
+                &pinned,
+                super::super::OverrideStat::new(uid, gid, mode, rdev),
+            )?
+            .map(|(stat_file, _)| stat_file);
         let data = Arc::new(InodeData {
             inode: detached.inode,
             path: RwLock::new(path.clone()),
