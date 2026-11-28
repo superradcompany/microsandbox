@@ -227,15 +227,14 @@ impl TlsProxy {
         }
 
         let should_bypass = tls_state.should_bypass(&sni_name);
-        if strict
-            && should_bypass
+        let strict_hostname_only = strict
             && network_policy.allows_egress_via_hostname(
                 guest_dst,
                 Protocol::Tcp,
                 &shared,
                 hostname_source,
-            )
-        {
+            );
+        if should_bypass && strict_hostname_only {
             tracing::debug!(
                 sni = %sni_name,
                 dst = %guest_dst,
@@ -266,6 +265,7 @@ impl TlsProxy {
                 connect_target,
                 &sni_name,
                 via_connect,
+                strict_hostname_only,
                 initial_buf,
                 from_smoltcp,
                 to_smoltcp,
@@ -478,6 +478,7 @@ pub(crate) async fn intercept_relay(
     connect_target: UpstreamTcpTarget,
     sni_name: &str,
     via_connect: bool,
+    require_http: bool,
     initial_buf: Vec<u8>,
     mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
@@ -494,7 +495,8 @@ pub(crate) async fn intercept_relay(
     } else {
         SecretsHandler::new_tls_intercepted(&secrets, sni_name, guest_dst.ip(), &shared)
     }
-    .with_guest_dst(guest_dst);
+    .with_guest_dst(guest_dst)
+    .with_require_http(require_http);
 
     // Get or generate per-domain certificate (includes cached ServerConfig).
     let domain_cert = tls_state
@@ -1543,6 +1545,7 @@ mod tests {
                     UpstreamTcpTarget::direct(upstream),
                     "example.com",
                     true,
+                    false,
                     Vec::new(),
                     from_rx,
                     to_tx,
@@ -1658,6 +1661,7 @@ mod tests {
             UpstreamTcpTarget::direct(upstream),
             "example.com",
             true,
+            false,
             Vec::new(),
             from_rx,
             to_tx,
@@ -1697,5 +1701,333 @@ mod tests {
             "a rejected header flight must forward nothing upstream, got {received:02x?}"
         );
         server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn strict_hostname_intercept_blocks_non_http_payloads() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // Non-HTTP payloads under strict + domain allow rule must be rejected
+        // before reaching upstream, including fragmented and post-HTTP streams.
+        for chunks in [
+            vec![b"SSH-2.0-OpenSSH_9.0\r\n".as_slice()],
+            vec![b"SSH-2.0".as_slice(), b"-OpenSSH_9.0\r\n".as_slice()],
+            vec![b"\x00\x01\x02\x03".as_slice()],
+            vec![b"SSH-2.0-OpenSSH_9.0 foo bar\r\n".as_slice()],
+        ] {
+            let check = async {
+                let (address, upstream_request, server) = spawn_upstream_request_sink().await;
+                let shared = Arc::new(SharedState::new(8));
+                shared.cache_resolved_hostname(
+                    "example.com",
+                    crate::netstack::shared::ResolvedHostnameFamily::Ipv4,
+                    [address.ip()],
+                    Duration::from_secs(60),
+                );
+                let state = test_tls_state(SecretsConfig::default());
+                let mut client = guest_client(&state);
+                let (from_tx, from_rx) = mpsc::channel(8);
+                let (to_tx, mut to_rx) = mpsc::channel(8);
+                let proxy = TlsProxy::new(
+                    None,
+                    address,
+                    UpstreamTcpTarget::direct(address),
+                    from_rx,
+                    to_tx,
+                    shared,
+                    state,
+                    Arc::new(NetworkPolicy::none().allow_domain("example.com").unwrap()),
+                    true,
+                    Arc::new(ProxyConnectState::new()),
+                    None,
+                    tokio::sync::watch::channel(None).1,
+                );
+                let relay = tokio::spawn(proxy.try_run());
+                send_client_tls_output(&mut client, &from_tx).await;
+                complete_relay_handshake(&mut client, &from_tx, &mut to_rx).await;
+
+                for chunk in &chunks {
+                    client.writer().write_all(chunk).unwrap();
+                    send_client_tls_output(&mut client, &from_tx).await;
+                }
+
+                let result = tokio::time::timeout(Duration::from_secs(3), relay)
+                    .await
+                    .expect("strict intercepted TLS relay did not close on non-HTTP payload")
+                    .unwrap();
+                assert!(
+                    result.is_err(),
+                    "strict intercepted TLS must reject non-HTTP payload: {chunks:?}"
+                );
+                drop(from_tx);
+                let received = tokio::time::timeout(Duration::from_secs(1), upstream_request)
+                    .await
+                    .expect("upstream sink did not finish")
+                    .expect("upstream sink task failed");
+                assert!(
+                    received.is_empty(),
+                    "non-HTTP payload reached upstream under strict hostname policy: {received:?}"
+                );
+                server.await.unwrap().unwrap();
+            };
+            tokio::time::timeout(Duration::from_secs(5), check)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_hostname_intercept_blocks_non_http_after_valid_http1_request() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let check = async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (received_tx, received_rx) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let stream = accept_with_deadline(listener).await.unwrap();
+                let mut stream = TlsAcceptor::from(upstream_server_config())
+                    .accept(stream)
+                    .await
+                    .unwrap();
+                let mut received = Vec::new();
+                match stream.read_to_end(&mut received).await {
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::UnexpectedEof
+                                | io::ErrorKind::ConnectionReset
+                                | io::ErrorKind::ConnectionAborted
+                        ) => {}
+                    Err(error) => panic!("upstream read failed: {error}"),
+                }
+                let _ = received_tx.send(received);
+            });
+
+            let shared = Arc::new(SharedState::new(8));
+            shared.cache_resolved_hostname(
+                "example.com",
+                crate::netstack::shared::ResolvedHostnameFamily::Ipv4,
+                [address.ip()],
+                Duration::from_secs(60),
+            );
+            let state = test_tls_state(SecretsConfig::default());
+            let mut client = guest_client(&state);
+            let (from_tx, from_rx) = mpsc::channel(8);
+            let (to_tx, mut to_rx) = mpsc::channel(8);
+            let proxy = TlsProxy::new(
+                None,
+                address,
+                UpstreamTcpTarget::direct(address),
+                from_rx,
+                to_tx,
+                shared,
+                state,
+                Arc::new(NetworkPolicy::none().allow_domain("example.com").unwrap()),
+                true,
+                Arc::new(ProxyConnectState::new()),
+                None,
+                tokio::sync::watch::channel(None).1,
+            );
+            let relay = tokio::spawn(proxy.try_run());
+            send_client_tls_output(&mut client, &from_tx).await;
+            complete_relay_handshake(&mut client, &from_tx, &mut to_rx).await;
+
+            let valid_http = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+            client.writer().write_all(valid_http).unwrap();
+            send_client_tls_output(&mut client, &from_tx).await;
+            client
+                .writer()
+                .write_all(b"SSH-2.0-OpenSSH_9.0\r\n")
+                .unwrap();
+            send_client_tls_output(&mut client, &from_tx).await;
+
+            let result = tokio::time::timeout(Duration::from_secs(3), relay)
+                .await
+                .expect("strict intercepted TLS relay did not close on keep-alive non-HTTP")
+                .unwrap();
+            assert!(result.is_err());
+            drop(from_tx);
+            let received = received_rx.await.unwrap();
+            assert_eq!(received, valid_http);
+            server.await.unwrap();
+        };
+        tokio::time::timeout(Duration::from_secs(5), check)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_strict_intercept_allows_non_http_without_substituting_secrets() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        for (strict, policy) in [
+            (
+                false,
+                NetworkPolicy::none().allow_domain("example.com").unwrap(),
+            ),
+            (true, NetworkPolicy::allow_all()),
+        ] {
+            let check = async {
+                let (address, upstream_request, server) = spawn_upstream_request_sink().await;
+                let shared = Arc::new(SharedState::new(8));
+                shared.cache_resolved_hostname(
+                    "example.com",
+                    crate::netstack::shared::ResolvedHostnameFamily::Ipv4,
+                    [address.ip()],
+                    Duration::from_secs(60),
+                );
+                let mut secrets = host_bound_secret_config();
+                secrets.secrets[0].passthrough_hosts =
+                    vec![HostPattern::Exact("example.com".into())];
+                let state = test_tls_state(secrets);
+                let mut client = guest_client(&state);
+                let (from_tx, from_rx) = mpsc::channel(8);
+                let (to_tx, mut to_rx) = mpsc::channel(8);
+                let proxy = TlsProxy::new(
+                    None,
+                    address,
+                    UpstreamTcpTarget::direct(address),
+                    from_rx,
+                    to_tx,
+                    shared,
+                    state,
+                    Arc::new(policy),
+                    strict,
+                    Arc::new(ProxyConnectState::new()),
+                    None,
+                    tokio::sync::watch::channel(None).1,
+                );
+                let relay = tokio::spawn(proxy.try_run());
+                send_client_tls_output(&mut client, &from_tx).await;
+                complete_relay_handshake(&mut client, &from_tx, &mut to_rx).await;
+
+                let payload = b"SSH-2.0-OpenSSH_9.0\r\nAuthorization: Bearer $MSB_KEY\r\n";
+                client.writer().write_all(payload).unwrap();
+                send_client_tls_output(&mut client, &from_tx).await;
+                let received = upstream_request.await.unwrap();
+                assert_eq!(received, payload);
+                assert!(
+                    !String::from_utf8_lossy(&received).contains("real-secret-value"),
+                    "secret must never be substituted on non-HTTP TLS stream"
+                );
+                drop(from_tx);
+                while to_rx.recv().await.is_some() {}
+                if let Err(error) = relay.await.unwrap() {
+                    assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+                }
+                server.await.unwrap().unwrap();
+            };
+            tokio::time::timeout(Duration::from_secs(5), check)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_hostname_intercept_does_not_substitute_secrets_and_allows_http2() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // Configured secrets bound to allowed host must not be substituted or
+        // forwarded when the guest sends a non-HTTP payload under strict mode.
+        let check_non_http = async {
+            let (address, upstream_request, server) = spawn_upstream_request_sink().await;
+            let shared = Arc::new(SharedState::new(8));
+            shared.cache_resolved_hostname(
+                "example.com",
+                crate::netstack::shared::ResolvedHostnameFamily::Ipv4,
+                [address.ip()],
+                Duration::from_secs(60),
+            );
+            let mut secrets = host_bound_secret_config();
+            secrets.secrets[0].passthrough_hosts = vec![HostPattern::Exact("example.com".into())];
+            let state = test_tls_state(secrets);
+            let mut client = guest_client(&state);
+            let (from_tx, from_rx) = mpsc::channel(8);
+            let (to_tx, mut to_rx) = mpsc::channel(8);
+            let proxy = TlsProxy::new(
+                None,
+                address,
+                UpstreamTcpTarget::direct(address),
+                from_rx,
+                to_tx,
+                shared,
+                state,
+                Arc::new(NetworkPolicy::none().allow_domain("example.com").unwrap()),
+                true,
+                Arc::new(ProxyConnectState::new()),
+                None,
+                tokio::sync::watch::channel(None).1,
+            );
+            let relay = tokio::spawn(proxy.try_run());
+            send_client_tls_output(&mut client, &from_tx).await;
+            complete_relay_handshake(&mut client, &from_tx, &mut to_rx).await;
+
+            client
+                .writer()
+                .write_all(b"SSH-2.0-OpenSSH_9.0\r\nAuthorization: Bearer $MSB_KEY\r\n")
+                .unwrap();
+            send_client_tls_output(&mut client, &from_tx).await;
+
+            let result = tokio::time::timeout(Duration::from_secs(3), relay)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(result.is_err());
+            drop(from_tx);
+            assert!(upstream_request.await.unwrap().is_empty());
+            server.await.unwrap().unwrap();
+        };
+        tokio::time::timeout(Duration::from_secs(5), check_non_http)
+            .await
+            .unwrap();
+
+        // HTTP/2 preface + SETTINGS remains allowed under strict domain policy.
+        let check_http2 = async {
+            let (address, upstream_request, server) = spawn_upstream_request_sink().await;
+            let shared = Arc::new(SharedState::new(8));
+            shared.cache_resolved_hostname(
+                "example.com",
+                crate::netstack::shared::ResolvedHostnameFamily::Ipv4,
+                [address.ip()],
+                Duration::from_secs(60),
+            );
+            let state = test_tls_state(SecretsConfig::default());
+            let mut client = guest_client(&state);
+            let (from_tx, from_rx) = mpsc::channel(8);
+            let (to_tx, mut to_rx) = mpsc::channel(8);
+            let proxy = TlsProxy::new(
+                None,
+                address,
+                UpstreamTcpTarget::direct(address),
+                from_rx,
+                to_tx,
+                shared,
+                state,
+                Arc::new(NetworkPolicy::none().allow_domain("example.com").unwrap()),
+                true,
+                Arc::new(ProxyConnectState::new()),
+                None,
+                tokio::sync::watch::channel(None).1,
+            );
+            let relay = tokio::spawn(proxy.try_run());
+            send_client_tls_output(&mut client, &from_tx).await;
+            complete_relay_handshake(&mut client, &from_tx, &mut to_rx).await;
+
+            let h2_preface_and_settings =
+                b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
+            client.writer().write_all(h2_preface_and_settings).unwrap();
+            send_client_tls_output(&mut client, &from_tx).await;
+            let received = upstream_request.await.unwrap();
+            assert_eq!(received, h2_preface_and_settings);
+            drop(from_tx);
+            while to_rx.recv().await.is_some() {}
+            if let Err(error) = relay.await.unwrap() {
+                assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+            }
+            server.await.unwrap().unwrap();
+        };
+        tokio::time::timeout(Duration::from_secs(5), check_http2)
+            .await
+            .unwrap();
     }
 }
