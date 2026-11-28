@@ -93,9 +93,11 @@ async fn check_connect(ipv6: bool, listening: bool) {
     let server = if listening {
         let socket = if ipv6 { v6.as_ref().unwrap() } else { &v4 };
         socket.listen(4).unwrap();
-        socket.set_nonblocking(true).unwrap();
-        let listener =
-            tokio::net::TcpListener::from_std(socket.try_clone().unwrap().into()).unwrap();
+        // Set on the clone: a duplicated Windows socket does not inherit
+        // non-blocking mode, and a blocking accept would stall the runtime.
+        let listener: std::net::TcpListener = socket.try_clone().unwrap().into();
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
         Some(tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             stream.write_all(b"ready").await.unwrap();
