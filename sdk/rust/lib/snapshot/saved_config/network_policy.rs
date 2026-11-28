@@ -62,6 +62,8 @@ pub enum NetworkPolicyClear {
     MaxUdpConnections,
     /// TCP accept queue depth.
     TcpAcceptQueueSize,
+    /// SNI revalidation grace period.
+    DnsRevalidationGrace,
     /// Egress token buckets, not counters.
     EgressRateLimit,
     /// Ingress token buckets, not counters.
@@ -209,6 +211,7 @@ pub fn select_network_policy_defaults(
         max_inbound_tcp_connections,
         max_udp_connections,
         tcp_accept_queue_size,
+        dns_revalidation_grace_secs,
         rate_limiter,
         nat64_prefixes,
         ports: _,
@@ -307,6 +310,13 @@ pub fn select_network_policy_defaults(
         "network.tcp_accept_queue_size",
         explicit.tcp_accept_queue_size.is_some(),
         retain(NetworkPolicyClear::TcpAcceptQueueSize),
+        &mut observations,
+    );
+    selected.defaults.dns_revalidation_grace_secs = select(
+        dns_revalidation_grace_secs.as_ref(),
+        "network.dns_revalidation_grace_secs",
+        explicit.dns_revalidation_grace_secs.is_some(),
+        retain(NetworkPolicyClear::DnsRevalidationGrace),
         &mut observations,
     );
     selected.defaults.nat64_prefixes = select(

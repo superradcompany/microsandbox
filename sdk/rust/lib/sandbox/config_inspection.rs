@@ -243,6 +243,7 @@ impl SandboxConfigInspection {
             "network.http",
             "network.rate_limiter",
             "network.tcp_accept_queue_size",
+            "network.dns_revalidation_grace_secs",
             "resources.max_cpus",
             "resources.max_memory_mib",
             "resources.cpu_placement",

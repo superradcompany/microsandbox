@@ -134,6 +134,7 @@ fn zero_unlimited_and_explicit_empty_values_remain_distinct() {
         "max_inbound_tcp_connections",
         "max_udp_connections",
         "tcp_accept_queue_size",
+        "dns_revalidation_grace_secs",
         "rate_limiter",
         "nat64_prefixes",
         "ports",
@@ -156,6 +157,10 @@ fn malformed_network_numbers_and_limits_fail_before_activation() {
             "active.network.tcp_accept_queue_size",
         );
     }
+    reject(
+        &json!({"dns_revalidation_grace_secs":recorded(json!(3601))}),
+        "active.network.dns_revalidation_grace_secs",
+    );
     reject(
         &json!({"nat64_prefixes":recorded(json!(["64:ff9b::/64"]))}),
         "active.network.nat64_prefixes",
@@ -337,6 +342,26 @@ fn bindings() -> BTreeMap<String, SavedBindingReference> {
             id: "secret.token".into(),
         },
     )])
+}
+
+#[test]
+fn dns_revalidation_grace_is_omitted_unless_configured() {
+    let unset = SavedNetworkConfig::default();
+    let grace = json!({"dns_revalidation_grace_secs":recorded(json!(0))});
+
+    let unset_json = serde_json::to_value(&unset).unwrap();
+    let parsed = parse(&grace);
+
+    // Manifests without the setting must stay byte-identical for earlier releases.
+    assert!(unset_json.get("dns_revalidation_grace_secs").is_none());
+    assert_eq!(
+        parsed
+            .dns_revalidation_grace_secs
+            .as_ref()
+            .and_then(SavedValue::value),
+        Some(&0)
+    );
+    assert_eq!(serde_json::to_value(parsed).unwrap(), grace);
 }
 
 fn recorded(value: Value) -> Value {

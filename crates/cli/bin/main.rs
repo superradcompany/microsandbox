@@ -420,6 +420,7 @@ fn main() {
                     protocols: vec![2, 1],
                     required_restore_backing: true,
                     tcp_accept_queue_size: true,
+                    dns_revalidation_grace: cfg!(feature = "net"),
                     max_inbound_tcp_connections: cfg!(feature = "net"),
                     http_deny_message: cfg!(feature = "net"),
                     http_deny_json: cfg!(feature = "net"),

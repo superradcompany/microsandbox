@@ -32,6 +32,13 @@ pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 /// The well-known NAT64 prefix from RFC 6052.
 pub const WELL_KNOWN_NAT64_PREFIX: &str = "64:ff9b::/96";
 
+/// Default SNI revalidation grace period in seconds, used when
+/// [`NetworkSpec::dns_revalidation_grace_secs`] is omitted.
+pub const DEFAULT_DNS_REVALIDATION_GRACE_SECS: u64 = 60;
+
+/// Largest accepted [`NetworkSpec::dns_revalidation_grace_secs`].
+pub const MAX_DNS_REVALIDATION_GRACE_SECS: u64 = 3600;
+
 //--------------------------------------------------------------------------------------------------
 // Types: Root Filesystems
 //--------------------------------------------------------------------------------------------------
@@ -679,6 +686,12 @@ pub struct NetworkSpec {
     /// The host kernel clamps it to `net.core.somaxconn` (Linux) or `kern.ipc.somaxconn` (macOS).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tcp_accept_queue_size: Option<u32>,
+
+    /// Seconds after a DNS answer's TTL during which a TLS reconnect may still revalidate an
+    /// address that answer returned, `0..=3600`. Omitted is 60; zero requires the fresh answer
+    /// to contain the address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_revalidation_grace_secs: Option<u64>,
 
     /// Local network rate limits. Missing means unlimited in both directions.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1994,6 +2007,7 @@ impl Default for NetworkSpec {
             max_tcp_connections: None,
             max_udp_connections: None,
             tcp_accept_queue_size: None,
+            dns_revalidation_grace_secs: None,
             max_inbound_tcp_connections: None,
             rate_limiter: None,
             nat64_prefixes: default_nat64_prefixes(),

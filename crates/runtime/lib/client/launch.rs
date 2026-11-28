@@ -80,6 +80,11 @@ pub struct LaunchCapabilities {
     #[serde(default)]
     pub tcp_accept_queue_size: bool,
 
+    /// The network engine honors `network.dns_revalidation_grace_secs`. Older runtimes omit this
+    /// feature and would silently ignore the field, so the SDK refuses to send it to them.
+    #[serde(default)]
+    pub dns_revalidation_grace: bool,
+
     /// Inbound TCP connection limits are supported. Older runtimes omit this capability.
     #[serde(default)]
     pub max_inbound_tcp_connections: bool,

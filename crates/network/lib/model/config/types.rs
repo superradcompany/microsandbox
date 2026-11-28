@@ -108,6 +108,14 @@ pub struct NetworkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tcp_accept_queue_size: Option<TcpAcceptQueueSize>,
 
+    /// Seconds after a DNS answer's TTL during which a TLS reconnect may still revalidate an
+    /// address that answer returned. `None` uses
+    /// [`DEFAULT_DNS_REVALIDATION_GRACE_SECS`](microsandbox_types::DEFAULT_DNS_REVALIDATION_GRACE_SECS);
+    /// zero requires the fresh answer to contain the address.
+    // Omitted when unset so launches that do not ask for it stay byte-identical for older runtimes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_revalidation_grace_secs: Option<u64>,
+
     /// Egress and ingress rate limits. `None` means unlimited in both directions.
     #[serde(default)]
     pub rate_limiter: Option<NetworkRateLimiterConfig>,
@@ -348,6 +356,7 @@ impl Default for NetworkConfig {
             max_tcp_connections: None,
             max_udp_connections: None,
             tcp_accept_queue_size: None,
+            dns_revalidation_grace_secs: None,
             max_inbound_tcp_connections: None,
             rate_limiter: None,
             nat64_prefixes: default_nat64_prefixes(),
@@ -872,6 +881,23 @@ mod connection_limit_tests {
         }
         assert_eq!(TcpAcceptQueueSize::default(), TcpAcceptQueueSize::DEFAULT);
         assert_eq!(TcpAcceptQueueSize::DEFAULT.get(), 1024);
+    }
+
+    #[test]
+    fn wire_dns_revalidation_grace_is_omitted_when_unset() {
+        // Unset must not reach the wire at all: older runtimes then see the payload they know.
+        let unset = serde_json::to_value(NetworkConfig::default()).unwrap();
+        let config: NetworkConfig =
+            serde_json::from_value(serde_json::json!({"dns_revalidation_grace_secs": 0})).unwrap();
+
+        let spec: microsandbox_types::NetworkSpec =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        let back: NetworkConfig =
+            serde_json::from_value(serde_json::to_value(&spec).unwrap()).unwrap();
+
+        assert!(unset.get("dns_revalidation_grace_secs").is_none());
+        assert_eq!(spec.dns_revalidation_grace_secs, Some(0));
+        assert_eq!(back.dns_revalidation_grace_secs, Some(0));
     }
 
     #[test]

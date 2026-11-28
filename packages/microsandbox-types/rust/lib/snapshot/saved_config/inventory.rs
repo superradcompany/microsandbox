@@ -131,6 +131,7 @@ pub fn collect_binding_uses(
         max_inbound_tcp_connections: _,
         max_udp_connections: _,
         tcp_accept_queue_size: _,
+        dns_revalidation_grace_secs: _,
         rate_limiter: _,
         nat64_prefixes: _,
         ports,
