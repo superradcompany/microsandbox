@@ -31,7 +31,8 @@ use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::config::{SecretViolationAction, SecretsConfig};
 use crate::secrets::handler::{
-    SecretsHandler, first_line_is_not_http_request, looks_like_http_request_prefix,
+    SecretsHandler, first_line_is_not_http_request, is_http2_preface_prefix,
+    looks_like_http_request_prefix,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -247,7 +248,7 @@ impl TcpProxy {
         // refines over-allow when the cache matched a shared CDN IP;
         // CacheOnly is the non-TLS fallback path so Domain rules still
         // gate plain HTTP / SSH / etc.
-        if hostname_policy_deferred {
+        let strict_hostname_only = if hostname_policy_deferred {
             let source = match sni.as_deref() {
                 Some(name) => HostnameSource::Sni(name),
                 None => HostnameSource::CacheOnly,
@@ -276,6 +277,15 @@ impl TcpProxy {
                         shared.proxy_wake.wake();
                         return Ok(());
                     }
+                    // Capture strict hostname enforcement at admission time so a
+                    // short DNS cache TTL cannot expire during classify_first_flight.
+                    strict
+                        && network_policy.allows_egress_via_hostname(
+                            guest_dst,
+                            Protocol::Tcp,
+                            &shared,
+                            source,
+                        )
                 }
                 EgressEvaluation::Deny => {
                     tracing::debug!(
@@ -324,7 +334,9 @@ impl TcpProxy {
                     .await;
                 }
             }
-        }
+        } else {
+            false
+        };
 
         // A policy-required peek may already have captured a CONNECT request.
         // Otherwise the post-connect paths below classify it without delaying
@@ -433,13 +445,16 @@ impl TcpProxy {
             None
         } else if enforce_http_authority {
             let host = extract_http_host(&initial_buf).unwrap_or_default();
-            Some(SecretsHandler::new_plain_http_policy(
-                &secrets,
-                &host,
-                guest_dst,
-                network_policy.clone(),
-                shared.clone(),
-            ))
+            Some(
+                SecretsHandler::new_plain_http_policy(
+                    &secrets,
+                    &host,
+                    guest_dst,
+                    network_policy.clone(),
+                    shared.clone(),
+                )
+                .with_require_http(strict_hostname_only),
+            )
         } else if !secrets.secrets.is_empty() {
             Some(match extract_http_host(&initial_buf) {
                 Some(host) => {
@@ -666,7 +681,12 @@ fn strict_hostname_allow_is_opaque(
 
     let source = if let Some(name) = sni {
         HostnameSource::Sni(name)
-    } else if initial_buf.is_empty() || initial_buf.first() == Some(&0x16) {
+    } else if initial_buf.is_empty()
+        || initial_buf.first() == Some(&0x16)
+        || (!is_http2_preface_prefix(initial_buf)
+            && (!looks_like_http_request_prefix(initial_buf)
+                || first_line_is_not_http_request(initial_buf)))
+    {
         HostnameSource::CacheOnly
     } else {
         return false;
@@ -2884,6 +2904,232 @@ mod tests {
             proxy_connect.status(),
             ProxyConnectStatus::UpstreamConnectFailed
         );
+    }
+
+    #[tokio::test]
+    async fn strict_mode_blocks_plain_tcp_non_http_under_hostname_allow() {
+        for chunks in [
+            vec![b"SSH-2.0-OpenSSH_9.0\r\n".to_vec()],
+            vec![b"SSH-2.0".to_vec(), b"-OpenSSH_9.0\r\n".to_vec()],
+            vec![
+                b"GET /one HTTP/1.1\r\nHost: allowed.example\r\n\r\n".to_vec(),
+                b"SSH-2.0-OpenSSH_9.0\r\n".to_vec(),
+            ],
+        ] {
+            let (addr, sink) = spawn_sink().await;
+            let shared = Arc::new(shared_with("allowed.example", "127.0.0.1"));
+            let policy = Arc::new(NetworkPolicy {
+                default_egress: Action::Deny,
+                default_ingress: Action::Allow,
+                rules: vec![allow_tcp("allowed.example", addr.port())],
+            });
+            let proxy_connect = Arc::new(ProxyConnectState::new());
+            let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+            let (to_tx, _to_rx) = mpsc::channel::<Bytes>(8);
+            let expect_http_first = chunks.len() == 2 && chunks[0].starts_with(b"GET ");
+
+            for chunk in &chunks {
+                from_tx.send(Bytes::from(chunk.clone())).await.unwrap();
+            }
+            drop(from_tx);
+
+            TcpProxy::new(
+                None,
+                addr,
+                UpstreamTcpTarget::direct(addr),
+                from_rx,
+                to_tx,
+                shared,
+                policy,
+                Arc::new(SecretsConfig::default()),
+                None,
+                true,
+                proxy_connect,
+                None,
+                tokio::sync::watch::channel(None).1,
+            )
+            .try_run()
+            .await
+            .unwrap();
+
+            if expect_http_first {
+                assert_eq!(sink.await.unwrap(), chunks[0]);
+            } else {
+                // Single-chunk non-HTTP may deny before dialing; drop sink if still waiting.
+                let wire = match tokio::time::timeout(Duration::from_millis(200), sink).await {
+                    Ok(wire) => wire.unwrap(),
+                    Err(_) => Vec::new(),
+                };
+                assert!(
+                    wire.is_empty(),
+                    "non-HTTP payload reached upstream under strict hostname allow: {wire:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn non_strict_allows_plain_tcp_non_http_under_hostname_allow() {
+        let (addr, sink) = spawn_sink().await;
+        let shared = Arc::new(shared_with("allowed.example", "127.0.0.1"));
+        let policy = Arc::new(NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_tcp("allowed.example", addr.port())],
+        });
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, _to_rx) = mpsc::channel::<Bytes>(8);
+        let payload = b"SSH-2.0-OpenSSH_9.0\r\n";
+        from_tx.send(Bytes::from_static(payload)).await.unwrap();
+        drop(from_tx);
+
+        TcpProxy::new(
+            None,
+            addr,
+            UpstreamTcpTarget::direct(addr),
+            from_rx,
+            to_tx,
+            shared,
+            policy,
+            Arc::new(SecretsConfig::default()),
+            None,
+            false,
+            Arc::new(ProxyConnectState::new()),
+            None,
+            tokio::sync::watch::channel(None).1,
+        )
+        .try_run()
+        .await
+        .unwrap();
+
+        assert_eq!(sink.await.unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn strict_hostname_plain_tcp_allows_h2c_and_blocks_fake_h2c_preface() {
+        let (addr, sink) = spawn_sink().await;
+        let shared = Arc::new(shared_with("allowed.example", "127.0.0.1"));
+        let policy = Arc::new(NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_tcp("allowed.example", addr.port())],
+        });
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, _to_rx) = mpsc::channel::<Bytes>(8);
+        let req = h2c_first_request(b"allowed.example");
+        from_tx.send(Bytes::from(req)).await.unwrap();
+        drop(from_tx);
+
+        TcpProxy::new(
+            None,
+            addr,
+            UpstreamTcpTarget::direct(addr),
+            from_rx,
+            to_tx,
+            shared,
+            policy.clone(),
+            Arc::new(SecretsConfig::default()),
+            None,
+            true,
+            Arc::new(ProxyConnectState::new()),
+            None,
+            tokio::sync::watch::channel(None).1,
+        )
+        .try_run()
+        .await
+        .unwrap();
+
+        assert_eq!(
+            sink.await.unwrap(),
+            h2c_first_request_wire(b"allowed.example")
+        );
+
+        let (addr2, sink2) = spawn_sink().await;
+        let shared2 = Arc::new(shared_with("allowed.example", "127.0.0.1"));
+        let policy2 = Arc::new(NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_tcp("allowed.example", addr2.port())],
+        });
+        let (from_tx2, from_rx2) = mpsc::channel::<Bytes>(8);
+        let (to_tx2, _to_rx2) = mpsc::channel::<Bytes>(8);
+        from_tx2
+            .send(Bytes::from_static(b"PRI * HTTP/2.0\r\n"))
+            .await
+            .unwrap();
+        from_tx2
+            .send(Bytes::from_static(b"SSH-2.0-OpenSSH_9.0\r\n"))
+            .await
+            .unwrap();
+        drop(from_tx2);
+
+        let _ = TcpProxy::new(
+            None,
+            addr2,
+            UpstreamTcpTarget::direct(addr2),
+            from_rx2,
+            to_tx2,
+            shared2,
+            policy2,
+            Arc::new(SecretsConfig::default()),
+            None,
+            true,
+            Arc::new(ProxyConnectState::new()),
+            None,
+            tokio::sync::watch::channel(None).1,
+        )
+        .try_run()
+        .await;
+
+        assert!(sink2.await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn strict_hostname_plain_tcp_blocks_non_http_after_dns_ttl_expires() {
+        let (addr, sink) = spawn_sink().await;
+        let shared = Arc::new(SharedState::new(4));
+        shared.cache_resolved_hostname(
+            "allowed.example",
+            crate::netstack::shared::ResolvedHostnameFamily::Ipv4,
+            [addr.ip()],
+            Duration::from_millis(20),
+        );
+        let policy = Arc::new(NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_tcp("allowed.example", addr.port())],
+        });
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, _to_rx) = mpsc::channel::<Bytes>(8);
+
+        from_tx.send(Bytes::from_static(b"GET ")).await.unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = from_tx
+                .send(Bytes::from_static(b"SSH-2.0-OpenSSH_9.0\r\n"))
+                .await;
+        });
+
+        let result = TcpProxy::new(
+            None,
+            addr,
+            UpstreamTcpTarget::direct(addr),
+            from_rx,
+            to_tx,
+            shared,
+            policy,
+            Arc::new(SecretsConfig::default()),
+            None,
+            true,
+            Arc::new(ProxyConnectState::new()),
+            None,
+            tokio::sync::watch::channel(None).1,
+        )
+        .try_run()
+        .await;
+
+        result.unwrap();
+        assert!(sink.await.unwrap().is_empty());
     }
 
     #[tokio::test]

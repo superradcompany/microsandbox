@@ -108,6 +108,8 @@ pub struct SecretsHandler {
     http_authority: Option<HttpAuthorityValidator>,
     /// Whether a proven non-HTTP stream should bypass HTTP framing permanently.
     opaque: bool,
+    /// Whether this connection must carry valid HTTP/1.x or HTTP/2 requests.
+    require_http: bool,
     /// Current HTTP/1 request metadata while processing body continuations.
     http1_request_summary: Option<RequestSummary>,
     /// Buffered HTTP bytes while waiting for complete headers or a complete
@@ -737,6 +739,7 @@ impl SecretsHandler {
             http_state: HttpState::AwaitingHeaders,
             http_authority,
             opaque: false,
+            require_http: false,
             http1_request_summary: None,
             http_pending: Vec::new(),
             unsupported_body_tail: Vec::new(),
@@ -750,6 +753,12 @@ impl SecretsHandler {
     /// Attach the original guest destination for structured violation logs.
     pub fn with_guest_dst(mut self, guest_dst: SocketAddr) -> Self {
         self.guest_dst = Some(guest_dst);
+        self
+    }
+
+    /// Require every request flight on this connection to be valid HTTP/1.x or HTTP/2.
+    pub(crate) fn with_require_http(mut self, require_http: bool) -> Self {
+        self.require_http = require_http;
         self
     }
 
@@ -841,7 +850,7 @@ impl SecretsHandler {
                     || !looks_like_http_request_prefix(&self.http_pending)
                 {
                     let pending = std::mem::take(&mut self.http_pending);
-                    let output = self.substitute_headers(&pending)?.into_owned();
+                    let output = self.scan_opaque(&pending)?.into_owned();
                     return Ok(Cow::Owned(output));
                 }
                 return Ok(Cow::Owned(Vec::new()));
@@ -856,10 +865,10 @@ impl SecretsHandler {
             return self.scan_opaque(data);
         }
 
-        if find_header_boundary(data).is_none()
-            && looks_like_http_request_prefix(data)
-            && !first_line_is_not_http_request(data)
-        {
+        if find_header_boundary(data).is_none() {
+            if !looks_like_http_request_prefix(data) || first_line_is_not_http_request(data) {
+                return self.scan_opaque(data);
+            }
             if data.len() > MAX_HTTP_HEADER_BYTES {
                 return Err(SecretViolationAction::Block);
             }
@@ -878,6 +887,9 @@ impl SecretsHandler {
     }
 
     fn scan_opaque<'a>(&mut self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, SecretViolationAction> {
+        if self.require_http {
+            return Err(SecretViolationAction::Block);
+        }
         // Fail closed when invalid bytes still resemble an HTTP request that
         // requires authority validation. Conclusively opaque streams rely on
         // the proxy's connection-level placeholder policy.
@@ -966,6 +978,21 @@ impl SecretsHandler {
             Some(pos) => (&data[..pos], &data[pos..]),
             None => (data, &[] as &[u8]),
         };
+
+        if boundary.is_some() {
+            if skip_leading_empty_http_lines(header_bytes).is_empty() {
+                if self.require_http {
+                    return Err(SecretViolationAction::Block);
+                }
+            } else if !looks_like_http_request_prefix(header_bytes)
+                || first_line_is_not_http_request(header_bytes)
+            {
+                if self.http_authority.is_some() {
+                    return Err(SecretViolationAction::Block);
+                }
+                return self.scan_opaque(data);
+            }
+        }
 
         // A single chunk may carry headers + body + the start of the next
         // pipelined request. Compute how many post-boundary bytes belong to
@@ -1419,6 +1446,7 @@ impl SecretsHandler {
     /// Returns true if this connection needs no secret substitution or violation detection.
     pub fn is_empty(&self) -> bool {
         self.http_authority.is_none()
+            && !self.require_http
             && self.http_pending.is_empty()
             && self.unsupported_body_tail.is_empty()
             && self.http1_request_summary.is_none()
@@ -2148,7 +2176,7 @@ fn is_authorization_header(line: &str) -> bool {
         .is_some_and(|bytes| bytes.eq_ignore_ascii_case(AUTHORIZATION_HEADER_NAME))
 }
 
-fn is_http2_preface_prefix(data: &[u8]) -> bool {
+pub(crate) fn is_http2_preface_prefix(data: &[u8]) -> bool {
     !data.is_empty()
         && if data.len() <= HTTP2_PREFACE.len() {
             HTTP2_PREFACE.starts_with(data)
@@ -2394,7 +2422,7 @@ fn parse_http_request_metadata(
     if version == "HTTP/2.0" {
         return Err(SecretViolationAction::Block);
     }
-    if !version.starts_with("HTTP/1.") {
+    if !is_http1_version(version) {
         return Err(SecretViolationAction::Block);
     }
 
@@ -2425,7 +2453,14 @@ fn parse_http_request_metadata(
 }
 
 fn http_request_version(request_line: &str) -> Option<&str> {
-    split_http_request_line(request_line).map(|(_, _, version)| version)
+    let (_, _, version) = split_http_request_line(request_line)?;
+    is_http1_version(version).then_some(version)
+}
+
+fn is_http1_version(version: &str) -> bool {
+    version
+        .strip_prefix("HTTP/1.")
+        .is_some_and(|minor| !minor.is_empty() && minor.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn split_http_request_line(request_line: &str) -> Option<(&str, &str, &str)> {
@@ -2538,7 +2573,7 @@ pub(crate) fn looks_like_http_request_prefix(data: &[u8]) -> bool {
     }
 
     let data = skip_leading_empty_http_lines(data);
-    if data.is_empty() {
+    if data.is_empty() || data == b"\r" {
         return true;
     }
 
@@ -7339,5 +7374,63 @@ mod tests {
         append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
         append_http2_header_frames(&mut request, 1, true, &interspersed).unwrap();
         assert!(handler.substitute(&request).is_ok());
+    }
+
+    #[test]
+    fn non_http_ascii_first_line_never_receives_secret_substitution() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.passthrough_hosts = vec![HostPattern::Exact("api.openai.com".into())];
+        let config = make_config(vec![secret]);
+
+        // Single write without \r\n\r\n.
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        let payload = b"SSH-2.0-OpenSSH_9.0\r\nAuthorization: Bearer $KEY\r\n";
+        assert_eq!(handler.substitute(payload).unwrap().as_ref(), payload);
+
+        // Split writes: banner first, then placeholder line without \r\n\r\n.
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        assert_eq!(
+            handler
+                .substitute(b"SSH-2.0-OpenSSH_9.0\r\n")
+                .unwrap()
+                .as_ref(),
+            b"SSH-2.0-OpenSSH_9.0\r\n"
+        );
+        assert_eq!(
+            handler
+                .substitute(b"Authorization: Bearer $KEY\r\n")
+                .unwrap()
+                .as_ref(),
+            b"Authorization: Bearer $KEY\r\n"
+        );
+
+        // Non-HTTP first line even with \r\n\r\n in the stream.
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        let with_crlf_crlf = b"SSH-2.0-OpenSSH_9.0\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        assert_eq!(
+            handler.substitute(with_crlf_crlf).unwrap().as_ref(),
+            with_crlf_crlf
+        );
+    }
+
+    #[test]
+    fn non_http_three_token_first_line_is_not_buffered_as_http() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.passthrough_hosts = vec![HostPattern::Exact("api.openai.com".into())];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let payload = b"SSH-2.0-OpenSSH_9.0 foo bar\r\nAuthorization: Bearer $KEY\r\n";
+        assert_eq!(handler.substitute(payload).unwrap().as_ref(), payload);
+    }
+
+    #[test]
+    fn empty_header_block_is_blocked_when_require_http_is_enabled() {
+        let mut handler = SecretsHandler::new(&SecretsConfig::default(), "api.openai.com", true)
+            .with_require_http(true);
+        assert_eq!(
+            handler.substitute(b"\r\n\r\n").unwrap_err(),
+            SecretViolationAction::Block
+        );
     }
 }
