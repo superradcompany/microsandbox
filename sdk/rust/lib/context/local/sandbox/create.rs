@@ -683,6 +683,19 @@ impl LocalContext {
                 // All source payloads are now child-owned; runtime handles must not retain the source.
                 config.snapshot_lease = None;
 
+                // A fresh home has no sandbox collection yet. Only the OCI branch below creates the
+                // sandbox directory, so bind and disk-image roots would otherwise reach the protected
+                // layout's non-recursive create with no parent. Create the collection only; the
+                // protected layout still creates and admits the named sandbox itself.
+                let sandboxes_dir = self.sandboxes_dir();
+                let worker_storage = preparation.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _storage = worker_storage;
+                    std::fs::create_dir_all(sandboxes_dir)
+                })
+                .await
+                .map_err(|error| MicrosandboxError::Runtime(error.to_string()))??;
+
                 // Resolve OCI images before spawning the sandbox process.
                 if let RootfsSource::Oci(oci) = config.spec.image.clone() {
                     let reference = oci.reference;
@@ -3224,6 +3237,71 @@ mod tests {
             "{error}"
         );
         assert!(backend.inner.db.get().is_none());
+    }
+
+    // Regression for #2041: on a fresh home only the OCI branch created the `sandboxes/`
+    // collection, so a bind-rootfs create failed with a bare ENOENT while reserving storage.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_rootfs_create_on_fresh_home_reaches_runtime_launch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::config::{GlobalConfigPatch, layers::BackendConfig};
+
+        let temp = tempfile::Builder::new()
+            .prefix("msb-fresh")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let home = temp.path().join("home");
+        // Answers the capability probes, then refuses to boot anything.
+        let runtime = temp.path().join("msb");
+        let firmware = temp.path().join("libkrunfw");
+        fs::write(
+            &runtime,
+            r#"#!/bin/sh
+case "$1" in
+--version) printf 'msb 0.6.18';;
+__launch-protocol) printf '%s' '{"protocols":[2,1],"protected_guest_state":true,"nested_virt":false}';;
+*) exit 1;;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&firmware, b"never loaded: the stand-in runtime exits first").unwrap();
+        let managed = serde_json::from_value(serde_json::json!({
+            "paths": {"msb": runtime, "libkrunfw": firmware}
+        }))
+        .unwrap();
+        let sources = BackendConfig::new(GlobalConfigPatch::new().home(home), managed);
+        let backend = Arc::new(LocalContext::from_backend_config(
+            sources
+                .prepare_for_local_backend(Default::default())
+                .unwrap(),
+            crate::context::ContextSelectionSource::Programmatic,
+            None,
+        ));
+        let root = temp.path().join("rootfs");
+        fs::create_dir(&root).unwrap();
+        assert!(!backend.sandboxes_dir().exists());
+
+        let error = backend
+            .create_sandbox(
+                backend.clone(),
+                crate::Sandbox::builder("fresh-bind").image(root),
+                SpawnMode::Attached,
+                None,
+            )
+            .await
+            .err()
+            .expect("the stand-in runtime cannot boot a sandbox");
+
+        // Storage preparation succeeded; the failure comes from the runtime itself.
+        assert!(
+            !error.to_string().contains("No such file or directory"),
+            "{error}"
+        );
+        assert!(backend.sandboxes_dir().is_dir());
     }
 
     #[tokio::test]
