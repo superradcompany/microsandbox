@@ -582,7 +582,11 @@ fn capture_inodes(fs: &PassthroughFs, excluded: &BTreeSet<u64>) -> io::Result<Ve
         let components = if inode_id == 1 {
             Vec::new()
         } else {
-            let fd = open_macos_inode_for_path(fs, inode_id)?;
+            let fd = match open_macos_inode_for_path(fs, inode_id) {
+                Ok(fd) => fd,
+                Err(_) if host_object_gone(fs, inode_id, &data) => continue,
+                Err(err) => return Err(err),
+            };
             let path = fd_path(fd.as_raw_fd())?;
             relative_components(&root_path, &path)?
         };
@@ -1005,6 +1009,24 @@ fn fd_path(fd: RawFd) -> io::Result<PathBuf> {
     Ok(PathBuf::from(OsStr::from_bytes(path.to_bytes())))
 }
 
+/// Whether the host object behind a tracked inode no longer exists and no open
+/// file or directory handle refers to it.
+#[cfg(target_os = "macos")]
+fn host_object_gone(fs: &PassthroughFs, inode_id: u64, data: &InodeData) -> bool {
+    let path = inode::vol_path(data.dev, data.ino);
+    let mut st = unsafe { std::mem::zeroed::<libc::stat>() };
+    let missing = unsafe { libc::lstat(path.as_ptr(), &mut st) } < 0
+        && io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT);
+    missing
+        && fs.handles.read().unwrap().for_inode(inode_id).is_none()
+        && !fs
+            .dir_handles
+            .read()
+            .unwrap()
+            .values()
+            .any(|handle| handle.inode == inode_id)
+}
+
 #[cfg(target_os = "macos")]
 fn open_macos_inode_for_path(fs: &PassthroughFs, inode_id: u64) -> io::Result<OwnedFd> {
     let (dev, ino) = {
@@ -1339,6 +1361,46 @@ mod tests {
             entry.inode
         );
         source.unlink(context(), 1, c"renamed").unwrap();
+        assert!(capture(&source).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn capture_skips_host_deleted_inode_without_handles() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("data"), b"old").unwrap();
+        let source = backend(root.path());
+        source.init(FsOptions::empty()).unwrap();
+        let entry = source.lookup(context(), 1, c"data").unwrap();
+        std::fs::remove_file(root.path().join("data")).unwrap();
+
+        let encoded = capture(&source).unwrap();
+        let destination = backend(root.path());
+        restore(&destination, &encoded).unwrap();
+        assert!(
+            destination
+                .inodes
+                .read()
+                .unwrap()
+                .get(&entry.inode)
+                .is_none()
+        );
+
+        std::fs::write(root.path().join("data"), b"new").unwrap();
+        let fresh = destination.lookup(context(), 1, c"data").unwrap();
+        assert_ne!(fresh.inode, entry.inode);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn capture_refuses_host_deleted_inode_with_open_handle() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("data"), b"old").unwrap();
+        let source = backend(root.path());
+        source.init(FsOptions::empty()).unwrap();
+        let entry = source.lookup(context(), 1, c"data").unwrap();
+        source.open(context(), entry.inode, false, 0).unwrap();
+        std::fs::remove_file(root.path().join("data")).unwrap();
         assert!(capture(&source).is_err());
     }
 
