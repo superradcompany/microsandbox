@@ -525,6 +525,8 @@ where
 {
     for server in docker_credential_servers(hostname) {
         match lookup(&server) {
+            Ok(DockerCredential::UsernamePassword(username, password))
+                if username.is_empty() && password.is_empty() => {}
             Ok(DockerCredential::UsernamePassword(username, password)) => {
                 tracing::debug!(registry = hostname, server = %server, "resolved registry auth from Docker credentials");
                 return Some(RegistryAuth::Basic { username, password });
@@ -1134,8 +1136,24 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_registry_auth_with_lookup_skips_empty_credentials() {
+        let auth = resolve_registry_auth_with_lookup("ghcr.io", |_| {
+            Ok(DockerCredential::UsernamePassword(
+                String::new(),
+                String::new(),
+            ))
+        });
+
+        assert!(auth.is_none());
+    }
+
+    #[test]
     fn test_resolve_registry_auth_with_lookup_tries_docker_hub_aliases() {
         let auth = resolve_registry_auth_with_lookup("docker.io", |server| match server {
+            "docker.io" => Ok(DockerCredential::UsernamePassword(
+                String::new(),
+                String::new(),
+            )),
             "https://index.docker.io/v1/" => Ok(DockerCredential::UsernamePassword(
                 "docker-user".to_string(),
                 "docker-pass".to_string(),
