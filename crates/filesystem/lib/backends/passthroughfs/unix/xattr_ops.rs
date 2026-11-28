@@ -3,6 +3,8 @@
 //! Guest xattr access is limited to user.* attributes, except the reserved
 //! user.msb and user.overlay namespaces. This keeps host-controlled metadata
 //! namespaces from reaching the backing filesystem through guest requests.
+//! Reads of any other name answer ENODATA, so it looks absent, as it does in
+//! listxattr; writes and removals answer EACCES.
 //!
 //! The same policy applies in every stat-virtualization mode. That setting
 //! controls Microsandbox's own stat overlay, not access to arbitrary host xattrs.
@@ -113,8 +115,12 @@ pub(crate) fn do_getxattr(
         return Err(platform::enodata());
     }
 
+    // A hidden name reads as absent, as listxattr already presents it. The
+    // guest kernel asks for some of these names on its own and treats only
+    // ENODATA (or EOPNOTSUPP) as "none": execve reads security.capability,
+    // and any other error makes the exec fail with that error.
     if !guest_xattr_name_allowed(name.to_bytes()) {
-        return Err(platform::eacces());
+        return Err(platform::enodata());
     }
 
     with_xattr_fd(fs, ino, |fd| {
