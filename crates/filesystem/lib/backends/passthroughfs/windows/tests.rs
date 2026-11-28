@@ -3552,3 +3552,220 @@ fn dax_namespace_change_keeps_mapping(replace: bool, fail_refresh: bool) {
     .unwrap();
     assert!(seen.lock().unwrap().is_empty());
 }
+
+//--------------------------------------------------------------------------------------------------
+// Tests: guest renames and names cached under the destination
+//--------------------------------------------------------------------------------------------------
+
+/// How long a test waits for one step of another thread.
+const STEP_LIMIT: Duration = Duration::from_secs(10);
+
+/// Every name and identity points at a tracked inode, and every tracked inode
+/// other than the root has a name (nothing in the guest holds a removed file).
+fn assert_every_inode_named(fs: &PassthroughFs, step: &str) {
+    let inodes = fs.inodes.read().unwrap();
+    for (path, data) in &inodes.by_path {
+        assert!(
+            inodes
+                .by_inode
+                .get(&data.inode)
+                .is_some_and(|tracked| Arc::ptr_eq(tracked, data)),
+            "{step}: {path:?} names untracked inode {}",
+            data.inode
+        );
+    }
+    for (identity, data) in &inodes.by_identity {
+        assert!(
+            inodes
+                .by_inode
+                .get(&data.inode)
+                .is_some_and(|tracked| Arc::ptr_eq(tracked, data)),
+            "{step}: identity {identity:?} points at untracked inode {}",
+            data.inode
+        );
+    }
+    for (&inode, data) in &inodes.by_inode {
+        if inode == ROOT_INODE {
+            continue;
+        }
+        assert!(
+            inodes
+                .by_path
+                .values()
+                .any(|alias| Arc::ptr_eq(alias, data)),
+            "{step}: inode {inode} is tracked without a name"
+        );
+    }
+}
+
+/// A guest renames a directory, and inside the window between the host rename
+/// and the inode table following it a host process replaces the moved child
+/// while the guest looks up the new names. The lookup finds the moved
+/// directory (by its identity) and the host's new child. When the rename
+/// finishes, the directory keeps its inode under the new name, the child's
+/// name keeps the host's file, and the replaced child is no longer tracked.
+#[test]
+fn a_lookup_inside_a_directory_rename_window_keeps_what_it_found() {
+    let temp = TempDir::new();
+    std::fs::create_dir(temp.path.join("dir")).unwrap();
+    std::fs::write(temp.path.join("dir").join("child"), b"child").unwrap();
+    let fs = fs_for(&temp.path);
+    let dir = fs.lookup(context(), ROOT_INODE, c"dir").unwrap().inode;
+    let child = fs.lookup(context(), dir, c"child").unwrap().inode;
+
+    let (renamed_tx, renamed_rx) = std::sync::mpsc::channel::<()>();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
+    let (in_dir, in_child) = std::thread::scope(|scope| {
+        let racer = scope.spawn(|| {
+            // Moved in: a Receiver cannot be shared with the scoped thread.
+            let renamed_rx = renamed_rx;
+            renamed_rx
+                .recv_timeout(STEP_LIMIT)
+                .expect("rename reaching its hook");
+            let moved = temp.path.join("dir2");
+            std::fs::write(moved.join("child.tmp"), b"host").unwrap();
+            std::fs::rename(moved.join("child.tmp"), moved.join("child")).unwrap();
+            let in_dir = fs.lookup(context(), ROOT_INODE, c"dir2").unwrap().inode;
+            let in_child = fs.lookup(context(), in_dir, c"child").unwrap().inode;
+            resume_tx.send(()).unwrap();
+            (in_dir, in_child)
+        });
+        remove_ops::AFTER_HOST_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                renamed_tx.send(()).unwrap();
+                resume_rx
+                    .recv_timeout(STEP_LIMIT)
+                    .expect("racing lookups finished");
+            }));
+        });
+        fs.rename(context(), ROOT_INODE, c"dir", ROOT_INODE, c"dir2", 0)
+            .unwrap();
+        racer.join().unwrap()
+    });
+
+    assert_eq!(in_dir, dir, "the window lookup finds the moved directory");
+    assert_ne!(in_child, child, "the window lookup finds the host's child");
+    assert_eq!(
+        fs.lookup(context(), ROOT_INODE, c"dir2").unwrap().inode,
+        dir,
+        "the moved directory keeps its inode"
+    );
+    fs.getattr(context(), dir, None).unwrap();
+    let now = fs.lookup(context(), dir, c"child").unwrap();
+    assert_eq!(
+        now.inode, in_child,
+        "the child's name keeps the host's file"
+    );
+    assert_eq!(now.attr.st_size, 4);
+    let (handle, _) = fs.open(context(), now.inode, false, 0).unwrap();
+    let handle = handle.unwrap();
+    let mut writer = CaptureWriter { bytes: Vec::new() };
+    fs.read(context(), now.inode, handle, &mut writer, 4096, 0, None, 0)
+        .unwrap();
+    assert_eq!(writer.bytes, b"host");
+    fs.release(context(), now.inode, 0, handle, false, false, None)
+        .unwrap();
+    assert!(
+        !fs.inodes.read().unwrap().by_inode.contains_key(&child),
+        "the replaced child is still tracked"
+    );
+    assert_every_inode_named(&fs, "lookup inside a directory rename window");
+}
+
+/// A guest renames a directory onto a name whose earlier directory the host
+/// removed while the guest still had it and its child cached. The stale child
+/// entry under the destination is finished, not overwritten and left tracked
+/// without a name.
+#[test]
+fn a_directory_rename_onto_stale_cached_children_finishes_them() {
+    let temp = TempDir::new();
+    std::fs::create_dir(temp.path.join("dir2")).unwrap();
+    std::fs::write(temp.path.join("dir2").join("child"), b"stale").unwrap();
+    let fs = fs_for(&temp.path);
+    let stale_dir = fs.lookup(context(), ROOT_INODE, c"dir2").unwrap().inode;
+    let stale_child = fs.lookup(context(), stale_dir, c"child").unwrap().inode;
+    std::fs::remove_dir_all(temp.path.join("dir2")).unwrap();
+    std::fs::create_dir(temp.path.join("dir")).unwrap();
+    std::fs::write(temp.path.join("dir").join("child"), b"moved").unwrap();
+    let dir = fs.lookup(context(), ROOT_INODE, c"dir").unwrap().inode;
+    let child = fs.lookup(context(), dir, c"child").unwrap().inode;
+
+    fs.rename(context(), ROOT_INODE, c"dir", ROOT_INODE, c"dir2", 0)
+        .unwrap();
+
+    assert_eq!(
+        fs.lookup(context(), ROOT_INODE, c"dir2").unwrap().inode,
+        dir
+    );
+    assert_eq!(fs.lookup(context(), dir, c"child").unwrap().inode, child);
+    let inodes = fs.inodes.read().unwrap();
+    for stale in [stale_dir, stale_child] {
+        assert!(
+            !inodes.by_inode.contains_key(&stale),
+            "stale inode {stale} is still tracked"
+        );
+    }
+    drop(inodes);
+    assert_every_inode_named(&fs, "directory rename onto stale children");
+}
+
+/// A guest renames a directory with a cached grandchild, and inside the window
+/// a host process moves the child directory away and puts a new one with a
+/// file of the same name in its place; the guest looks up the new child
+/// directory but not its file. The moved child loses its name, and so does
+/// the grandchild cached under it: a later lookup of the grandchild's name
+/// finds the host's file, not the moved one.
+#[test]
+fn a_directory_rename_window_replace_drops_the_lost_childs_descendants() {
+    let temp = TempDir::new();
+    std::fs::create_dir_all(temp.path.join("dir").join("sub")).unwrap();
+    std::fs::write(temp.path.join("dir").join("sub").join("x"), b"old").unwrap();
+    let fs = fs_for(&temp.path);
+    let dir = fs.lookup(context(), ROOT_INODE, c"dir").unwrap().inode;
+    let sub = fs.lookup(context(), dir, c"sub").unwrap().inode;
+    let x = fs.lookup(context(), sub, c"x").unwrap().inode;
+
+    let (renamed_tx, renamed_rx) = std::sync::mpsc::channel::<()>();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
+    let in_sub = std::thread::scope(|scope| {
+        let racer = scope.spawn(|| {
+            let renamed_rx = renamed_rx;
+            renamed_rx
+                .recv_timeout(STEP_LIMIT)
+                .expect("rename reaching its hook");
+            let moved = temp.path.join("dir2");
+            std::fs::rename(moved.join("sub"), temp.path.join("away")).unwrap();
+            std::fs::create_dir(moved.join("sub")).unwrap();
+            std::fs::write(moved.join("sub").join("x"), b"host").unwrap();
+            let in_dir = fs.lookup(context(), ROOT_INODE, c"dir2").unwrap().inode;
+            let in_sub = fs.lookup(context(), in_dir, c"sub").unwrap().inode;
+            resume_tx.send(()).unwrap();
+            in_sub
+        });
+        remove_ops::AFTER_HOST_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                renamed_tx.send(()).unwrap();
+                resume_rx
+                    .recv_timeout(STEP_LIMIT)
+                    .expect("racing lookups finished");
+            }));
+        });
+        fs.rename(context(), ROOT_INODE, c"dir", ROOT_INODE, c"dir2", 0)
+            .unwrap();
+        racer.join().unwrap()
+    });
+
+    assert_ne!(in_sub, sub, "the window lookup finds the host's directory");
+    let now = fs.lookup(context(), in_sub, c"x").unwrap();
+    assert_ne!(now.inode, x, "the grandchild's name keeps the moved file");
+    assert_eq!(now.attr.st_size, 4);
+    let inodes = fs.inodes.read().unwrap();
+    for lost in [sub, x] {
+        assert!(
+            !inodes.by_inode.contains_key(&lost),
+            "lost inode {lost} is still tracked"
+        );
+    }
+    drop(inodes);
+    assert_every_inode_named(&fs, "directory rename window replace");
+}

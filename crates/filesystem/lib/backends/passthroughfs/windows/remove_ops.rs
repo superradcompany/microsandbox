@@ -1,5 +1,7 @@
 //! Removal and rename operations for the Windows passthrough backend.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::os::windows::io::AsRawHandle;
 
 use windows_sys::Win32::Foundation::{
@@ -19,6 +21,14 @@ use super::*;
 
 const FILE_RENAME_REPLACE_IF_EXISTS: u32 = 0x1;
 const FILE_RENAME_POSIX_SEMANTICS: u32 = 0x2;
+
+#[cfg(test)]
+thread_local! {
+    /// Runs on the renaming thread after the host rename and before the
+    /// inode table follows it, so a test can act inside that window.
+    pub(super) static AFTER_HOST_RENAME: RefCell<Option<Box<dyn FnOnce()>>> =
+        const { RefCell::new(None) };
+}
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -115,6 +125,7 @@ impl PassthroughFs {
         };
         if old_path == new_path || !new_path.exists() {
             std::fs::rename(old_path, new_path).map_err(host_error)?;
+            after_host_rename();
             return finish();
         }
         let destination = StdOpenOptions::new()
@@ -130,6 +141,7 @@ impl PassthroughFs {
             } else {
                 std::fs::rename(old_path, new_path).map_err(host_error)?;
             }
+            after_host_rename();
             finish()
         })
     }
@@ -267,22 +279,59 @@ impl PassthroughFs {
             return;
         }
         let mut inodes = self.inodes.write().unwrap();
-        let replaced = inodes.by_path.remove(new_path);
+        let mut replaced = inodes.by_path.remove(new_path);
+        // A lookup of the new name inside the window after the host rename
+        // already gave it to the moved object: keep it there.
+        if let Some(data) = &replaced
+            && data.identity.is_some()
+            && self.path_identity(new_path).ok().flatten() == data.identity
+        {
+            inodes.by_path.insert(new_path.to_path_buf(), data.clone());
+            replaced = None;
+        }
         let moved = inodes
             .by_path
             .iter()
             .filter(|(path, _)| path.starts_with(old_path))
             .map(|(path, data)| (path.clone(), data.clone()))
             .collect::<Vec<_>>();
+        // Inodes that lost a name to another: finished once the table is updated.
+        let mut displaced = Vec::new();
+        // Source paths whose inode lost its name: what was cached under them
+        // is not under the destination name either. The table is ordered, so
+        // a directory comes before its descendants.
+        let mut lost: Vec<PathBuf> = Vec::new();
         for (path, data) in moved {
             inodes.by_path.remove(&path);
+            if lost.iter().any(|lost| path.starts_with(lost)) {
+                displaced.push(data);
+                continue;
+            }
             // Cached descendants must follow directory renames on bind mounts too.
             // An unrelated destination inode keeps its retained pin.
-            let path = if path == old_path {
+            let target = if path == old_path {
                 new_path.to_path_buf()
             } else {
                 new_path.join(path.strip_prefix(old_path).expect("selected descendant"))
             };
+            // A name under the destination is already cached: by a lookup
+            // inside the window, or left over from an object the host removed.
+            // If the host has that cached object there (it replaced the moved
+            // descendant), the moved inode lost the name; otherwise the cached
+            // entry is stale.
+            if let Some(existing) = inodes.by_path.get(&target).cloned()
+                && !Arc::ptr_eq(&existing, &data)
+            {
+                if existing.identity.is_some()
+                    && self.path_identity(&target).ok().flatten() == existing.identity
+                {
+                    lost.push(path);
+                    displaced.push(data);
+                    continue;
+                }
+                inodes.by_path.remove(&target);
+                displaced.push(existing);
+            }
             let canonical = data.path();
             if canonical == old_path {
                 *data.path.write().unwrap() = new_path.to_path_buf();
@@ -293,14 +342,29 @@ impl PassthroughFs {
                         .expect("selected descendant"),
                 );
             }
-            inodes.by_path.insert(path, data);
+            inodes.by_path.insert(target, data);
         }
-        if let Some(replaced) = &replaced {
-            self.finish_removed_alias(&mut inodes, replaced);
+        displaced.extend(replaced);
+        for data in &displaced {
+            self.finish_removed_alias(&mut inodes, data);
         }
         drop(inodes);
-        if let Some(replaced) = replaced {
-            self.reap_owned_inode(replaced.inode);
+        for data in displaced {
+            self.reap_owned_inode(data.inode);
         }
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+fn after_host_rename() {
+    if let Some(hook) = AFTER_HOST_RENAME.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+fn after_host_rename() {}
