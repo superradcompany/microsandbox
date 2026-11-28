@@ -4,6 +4,7 @@ pub mod copy;
 pub mod extent;
 pub mod format;
 pub mod log_text;
+mod mount_path;
 pub mod private_file;
 pub mod process;
 pub mod process_lock;
@@ -283,6 +284,14 @@ pub fn is_windows_drive_separator_at(s: &str, index: usize) -> bool {
         && bytes[1] == b':'
         && matches!(bytes[2], b'\\' | b'/')
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use mount_path::{
+    decode_mount_host_path, encode_mount_host_path, mount_host_path_has_wire_separator,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Tests

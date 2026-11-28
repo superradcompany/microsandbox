@@ -192,6 +192,7 @@ impl PreviousLaunch {
             mounts: self.mounts,
             owned_volumes: self.owned_volumes,
             file_mounts: self.file_mounts,
+            mount_host_paths_encoded: false,
             disks: self.disks,
             init_path: self.init_path,
             exec_path: self.exec_path,

@@ -43,6 +43,7 @@ async fn executor(root: &Path, socket: &Path) -> Arc<RuntimeControlExecutor> {
         rootfs_upper_spec: None,
         mounts: Vec::new(),
         file_mounts: Vec::new(),
+        mount_host_paths_encoded: false,
         owned_volumes: Vec::new(),
         disks: Vec::new(),
         vsock: Vec::new(),

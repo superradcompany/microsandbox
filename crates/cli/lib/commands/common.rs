@@ -5353,21 +5353,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_apply_volume_rejects_comma_in_source_path() {
-        // Embedded commas in host paths could silently inject mount options
-        // through the spawn → VM wire format. The SDK rejects them at build
-        // time with a clear error; the CLI surfaces that error verbatim.
+    async fn test_apply_volume_accepts_comma_in_source_path() {
+        // Host paths are percent-encoded on the spawn -> VM wire, so a comma
+        // in a real directory name can no longer inject mount options and is
+        // accepted.
         let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
-        // apply_volume itself defers to MountBuilder which only validates at
-        // SandboxBuilder::build() — so the parse step succeeds and the
-        // rejection comes from the subsequent build.
-        let builder =
-            apply_volume(builder, "/path/with,comma:/dst").expect("apply_volume defers validation");
-        let err = builder.build().await.unwrap_err();
-        assert!(
-            err.to_string().contains("must not contain ','"),
-            "got: {err}"
-        );
+        let builder = apply_volume(builder, "/path/with,comma:/dst").expect("apply_volume parses");
+        builder
+            .build()
+            .await
+            .expect("comma in a host path is accepted");
     }
 
     /// Write a temp file with unique name, return its path.

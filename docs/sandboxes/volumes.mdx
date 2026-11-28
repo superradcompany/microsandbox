@@ -138,6 +138,8 @@ For new local sandboxes, relative host paths supplied through CLI flags or SDK c
 
 Existing saved sandboxes retain their previous path behavior. Relative host paths in old configurations remain relative when restarting or inheriting resources; they are not rejected, migrated, or rewritten automatically. Their original directory was not recorded, so changing the working directory can still change the selected source. New sandboxes, including newly created restore or branch children, save absolute host paths without modifying the source sandbox.
 
+Bind host paths may contain `,`, `;` and `:`, such as a directory named `Smith, John`. Starting a sandbox with such a path needs a runtime that supports it; with an older `msb`, the SDK and CLI return an error asking you to upgrade it.
+
 Use `--mount-file` when you want to bind one host file instead of an entire directory.
 
 File mounts expose the selected host inode through an isolated one-entry filesystem. They do not hard-link or copy the source, host changes remain visible, and other files in the source directory are not part of the guest-visible share. Writable file mounts receive the same default quota as directory binds; use `quota=<size>` to set a smaller or larger guest-growth budget.

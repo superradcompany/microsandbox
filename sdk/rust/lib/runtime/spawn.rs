@@ -341,6 +341,7 @@ impl LocalContext {
         };
         launch_contract::validate_exec_limits(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_guest_clock(&resolved_runtime.msb_path, config).await?;
+        launch_contract::validate_mount_host_paths(&resolved_runtime.msb_path, config).await?;
         launch_contract::validate_fs_state_limit(&resolved_runtime.msb_path, global).await?;
 
         #[cfg(feature = "net")]
@@ -2032,19 +2033,24 @@ fn resolve_file_mounts(
             continue;
         }
 
-        let filename = host
-            .file_name()
-            .and_then(OsStr::to_str)
-            .ok_or_else(|| {
-                MicrosandboxError::InvalidConfig(format!(
-                    "file mount has no valid UTF-8 filename: {}",
-                    host.display()
-                ))
-            })?
-            .to_string();
+        // The share exports the file under its guest name, not the host one:
+        // the name travels in agentd's `tag:filename:guest` list, and guest
+        // paths are already free of that list's separators while host file
+        // names may contain them.
+        let filename = file_mount_export_name(guest)?;
         file_mounts.insert(guest.clone(), (filename, guest_mount_tag(guest)));
     }
     Ok(file_mounts)
+}
+
+/// The single-file share's export name: the guest path's last component.
+fn file_mount_export_name(guest: &str) -> MicrosandboxResult<String> {
+    match guest.rsplit('/').next() {
+        Some(name) if !name.is_empty() && name != "." && name != ".." => Ok(name.to_string()),
+        _ => Err(MicrosandboxError::InvalidConfig(format!(
+            "file mount guest path has no file name: {guest}"
+        ))),
+    }
 }
 
 /// Push a `--mount tag:host_path[:ro]` arg pair.
@@ -2058,6 +2064,7 @@ fn push_dir_mount_arg(
     host_permissions: HostPermissions,
     follow_root_symlinks: bool,
     quota_mib: Option<u32>,
+    encode_host_path: bool,
 ) {
     let tag = guest_mount_tag(guest);
     push_dir_mount_arg_with_tag(
@@ -2069,6 +2076,7 @@ fn push_dir_mount_arg(
         host_permissions,
         follow_root_symlinks,
         quota_mib,
+        encode_host_path,
     );
 }
 
@@ -2083,8 +2091,12 @@ fn push_dir_mount_arg_with_tag(
     host_permissions: HostPermissions,
     follow_root_symlinks: bool,
     quota_mib: Option<u32>,
+    encode_host_path: bool,
 ) {
-    let mut arg = format!("{tag}:{host_display}");
+    let mut arg = format!(
+        "{tag}:{}",
+        wire_host_path(host_display.to_string(), encode_host_path)
+    );
     let mut opts = mount_option_tokens(options);
     append_policy_options(
         &mut opts,
@@ -2101,6 +2113,29 @@ fn push_dir_mount_arg_with_tag(
     mounts.push(arg);
 }
 
+/// A mount spec's host path: percent-encoded when the launch encodes host
+/// paths, as written otherwise.
+fn wire_host_path(host: String, encode: bool) -> String {
+    if encode {
+        microsandbox_utils::encode_mount_host_path(&host)
+    } else {
+        host
+    }
+}
+
+/// Whether this launch must percent-encode mount host paths: only when a bind
+/// host path contains a wire separator, so every other launch keeps the specs
+/// older runtimes accept. Launch validation refuses such a path for a runtime
+/// that does not advertise `mount_host_path_encoding`.
+pub(crate) fn mount_host_paths_need_encoding(config: &SandboxConfig) -> bool {
+    config.spec.mounts.iter().any(|mount| match mount {
+        VolumeMount::Bind { host, .. } => host
+            .to_str()
+            .is_some_and(microsandbox_utils::mount_host_path_has_wire_separator),
+        _ => false,
+    })
+}
+
 /// Collect a typed host-file mount for the runtime's single-file backend.
 #[allow(clippy::too_many_arguments)]
 fn push_file_mount_arg(
@@ -2112,8 +2147,12 @@ fn push_file_mount_arg(
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
     quota_mib: u32,
+    encode_host_path: bool,
 ) {
-    let mut arg = format!("{tag}:{}", host_file.display());
+    let mut arg = format!(
+        "{tag}:{}",
+        wire_host_path(host_file.display().to_string(), encode_host_path)
+    );
     let mut opts = mount_option_tokens(options);
     // SingleFileFs canonicalizes the selected source and never exports its
     // parent namespace, so file mounts do not need the directory-root opt-out.
@@ -2549,6 +2588,8 @@ fn machine_cli_args(
 
     // Process mounts: emit host-side device args and collect the matching
     // typed guest-side mount instructions for agentd.
+    let encode_host_paths = mount_host_paths_need_encoding(config);
+    launch.mount_host_paths_encoded = encode_host_paths;
     for mount in &config.spec.mounts {
         match mount {
             VolumeMount::Owned {
@@ -2577,6 +2618,7 @@ fn machine_cli_args(
                             Some(
                                 quota_mib.unwrap_or(crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB),
                             ),
+                            encode_host_paths,
                         );
                         launch.bootstrap.dir_mounts.push(BootstrapDirMount {
                             tag: id,
@@ -2631,6 +2673,7 @@ fn machine_cli_args(
                         *stat_virtualization,
                         *host_permissions,
                         quota,
+                        encode_host_paths,
                     );
                     launch.bootstrap.file_mounts.push(BootstrapFileMount {
                         tag: tag.clone(),
@@ -2651,6 +2694,7 @@ fn machine_cli_args(
                         *host_permissions,
                         *follow_root_symlinks,
                         Some(quota),
+                        encode_host_paths,
                     );
                     launch.bootstrap.dir_mounts.push(BootstrapDirMount {
                         tag: guest_mount_tag(guest),
@@ -2710,6 +2754,7 @@ fn machine_cli_args(
                             *host_permissions,
                             *follow_root_symlinks,
                             *quota_mib,
+                            encode_host_paths,
                         );
                         launch.bootstrap.dir_mounts.push(BootstrapDirMount {
                             tag: guest_mount_tag(guest),
@@ -2919,6 +2964,170 @@ mod tests {
     use crate::{
         SandboxConfigPatch, config::layers::BackendConfig, context::ContextSelectionSource,
     };
+
+    #[test]
+    fn dir_mount_arg_percent_encodes_wire_separators_in_the_host_path() {
+        let mut mounts = Vec::new();
+        for encode in [true, false] {
+            super::push_dir_mount_arg(
+                &mut mounts,
+                "/shared",
+                &"/Users/a/Smith, John;x:y",
+                MountOptions::default(),
+                StatVirtualization::Strict,
+                HostPermissions::Private,
+                false,
+                Some(64),
+                encode,
+            );
+        }
+
+        let (tag, rest) = mounts[0].split_once(':').unwrap();
+        assert_eq!(tag, super::guest_mount_tag("/shared"));
+        let (host, options) = rest.split_once(':').unwrap();
+        assert_eq!(host, "/Users/a/Smith%2C John%3Bx%3Ay");
+        assert_eq!(
+            microsandbox_utils::decode_mount_host_path(host).unwrap(),
+            "/Users/a/Smith, John;x:y"
+        );
+        assert!(options.contains("quota=64"));
+
+        // Unencoded launches keep the host path as written.
+        assert!(
+            mounts[1].contains(":/Users/a/Smith, John;x:y:"),
+            "{}",
+            mounts[1]
+        );
+    }
+
+    // Windows resolves this rooted path onto the current drive; the Windows
+    // drive-path variant is covered below.
+    #[tokio::test]
+    #[cfg(not(windows))]
+    async fn bind_mount_with_wire_separators_in_the_host_path_reaches_the_runtime_encoded() {
+        let host = "/host/Smith, John;x:y";
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.bind(host).readonly())
+            .volume("/other", |m| m.bind("/host/100% done"))
+            .build()
+            .await
+            .expect("a host path with `,`, `;` and `:` is accepted");
+
+        let rendered = render_args(&config);
+        let data_tag = super::guest_mount_tag("/data");
+        let expected = format!(
+            "{data_tag}:/host/Smith%2C John%3Bx%3Ay:ro,quota={}",
+            crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--mount" && pair[1] == expected),
+            "missing encoded --mount arg in {rendered:?}"
+        );
+
+        // Once a launch is encoded, every host path in it is.
+        let other_tag = super::guest_mount_tag("/other");
+        let other = format!(
+            "{other_tag}:/host/100%25 done:quota={}",
+            crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+        );
+        assert!(rendered.contains(&other), "missing {other} in {rendered:?}");
+        assert!(rendered.contains(&"--mount-host-paths-encoded".to_string()));
+        assert!(rendered.contains(&format!(
+            "MSB_DIR_MOUNTS={data_tag}:/data:ro;{other_tag}:/other"
+        )));
+    }
+
+    #[tokio::test]
+    async fn bind_mount_without_wire_separators_keeps_the_host_path_as_written() {
+        // A launch whose host paths need no encoding is the one every runtime
+        // accepts: no flag, and a `%` stays an ordinary character.
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("100% done %41");
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.bind(&host))
+            .build()
+            .await
+            .unwrap();
+
+        assert!(!super::mount_host_paths_need_encoding(&config));
+
+        let rendered = render_args(&config);
+        let expected = format!(
+            "{}:{}:quota={}",
+            super::guest_mount_tag("/data"),
+            host.display(),
+            crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--mount" && pair[1] == expected),
+            "missing raw --mount arg {expected} in {rendered:?}"
+        );
+        assert!(!rendered.contains(&"--mount-host-paths-encoded".to_string()));
+    }
+
+    #[tokio::test]
+    async fn file_mount_with_wire_separators_in_the_host_name_is_exported_under_the_guest_name() {
+        let dir = tempfile::tempdir().unwrap();
+        // `:` is not allowed in a Windows file name; `,` and `;` are.
+        let host = dir.path().join("report, final;v2.txt");
+        std::fs::write(&host, b"x").unwrap();
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/etc/app.conf", |m| m.bind(&host).readonly())
+            .build()
+            .await
+            .expect("a host file name with `,` and `;` is accepted");
+
+        let file_mounts = super::resolve_file_mounts(&config).unwrap();
+        let (filename, tag) = &file_mounts["/etc/app.conf"];
+
+        assert_eq!(filename, "app.conf");
+
+        let rendered = render_args_with_file_mounts(&config, &file_mounts);
+        let expected = format!(
+            "{tag}:{}:ro,quota={}",
+            microsandbox_utils::encode_mount_host_path(&host.display().to_string()),
+            crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--file-mount" && pair[1] == expected),
+            "missing encoded --file-mount arg in {rendered:?}"
+        );
+        assert!(rendered.contains(&"--mount-host-paths-encoded".to_string()));
+        assert!(rendered.contains(&format!("MSB_FILE_MOUNTS={tag}:app.conf:/etc/app.conf:ro")));
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn drive_bind_mount_with_wire_separators_keeps_the_drive_colon() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.bind(r"C:\Users\Smith, John;x\data"))
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let data_tag = super::guest_mount_tag("/data");
+        let expected = format!(
+            r"{data_tag}:C:\Users\Smith%2C John%3Bx\data:quota={}",
+            crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--mount" && pair[1] == expected),
+            "missing Windows drive --mount arg in {rendered:?}"
+        );
+    }
 
     #[test]
     fn restored_disk_ownership_requires_exact_sandbox_directory_and_device_name() {
@@ -3739,6 +3948,9 @@ mod tests {
         }
         for m in &launch.file_mounts {
             pair(&mut out, "--file-mount", m.mount.clone());
+        }
+        if launch.mount_host_paths_encoded {
+            out.push("--mount-host-paths-encoded".to_string());
         }
         for d in &launch.disks {
             pair(&mut out, "--disk", d.clone());
